@@ -1,53 +1,57 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
-// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
+// input.js — keyboard and mouse state for Costa Verde Heat.
+// One shared Input object: keys currently held, keys pressed this frame,
+// and the mouse position in screen space plus its button state.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
+export const Input = {
+  keys: new Set(),
+  pressed: new Set(),
+  mouse: { x: 0, y: 0, down: false, clicked: false },
+};
 
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
+const GAME_KEYS = new Set([
+  'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' ',
+]);
 
-export function createInput(target) {
-  let left = false;
-  let right = false;
-  let actions = 0;
-
-  window.addEventListener('keydown', (event) => {
-    if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else return;
-    event.preventDefault();
+export function initInput(canvas) {
+  window.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (GAME_KEYS.has(k)) e.preventDefault();
+    if (!Input.keys.has(k)) Input.pressed.add(k);
+    Input.keys.add(k);
   });
-  window.addEventListener('keyup', (event) => {
-    if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
+  window.addEventListener('keyup', (e) => {
+    Input.keys.delete(e.key.toLowerCase());
   });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
   window.addEventListener('blur', () => {
-    left = false;
-    right = false;
+    Input.keys.clear();
+    Input.mouse.down = false;
   });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
+  canvas.addEventListener('mousemove', (e) => {
+    const r = canvas.getBoundingClientRect();
+    Input.mouse.x = e.clientX - r.left;
+    Input.mouse.y = e.clientY - r.top;
   });
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 0) {
+      Input.mouse.down = true;
+      Input.mouse.clicked = true;
+    }
+  });
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 0) Input.mouse.down = false;
+  });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+}
 
-  return {
-    /** -1 for left, 1 for right, 0 for neither or both. */
-    direction() {
-      return (right ? 1 : 0) - (left ? 1 : 0);
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
-  };
+export function endFrameInput() {
+  Input.pressed.clear();
+  Input.mouse.clicked = false;
+}
+
+export function keyDown(...names) {
+  return names.some((n) => Input.keys.has(n));
+}
+
+export function keyPressed(...names) {
+  return names.some((n) => Input.pressed.has(n));
 }
