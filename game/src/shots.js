@@ -1,100 +1,102 @@
-// shots.js — deterministic screenshot scenes for the entry's gallery.
-// Each scene arranges real game state (real entities, real HUD) and
-// freezes it; main.js renders a few frames and then sets
-// window.__shotReady so the capture script can fire.
+// shots.js — deterministic screenshot scenes, selected with ?shot=<name>.
+// Each scene arranges REAL game state (the actual player, cars, police and
+// mission objects), freezes the action, aims the gameplay camera, renders a
+// warm-up of frames and then sets window.__shotReady for the capture tool.
+window.CVH = window.CVH || {};
 
-import { vRoadX, hRoadY } from './world.js';
-import { createVehicle } from './vehicles.js';
-import { setStars } from './police.js';
+CVH.shots = {
+  name: null,
 
-function placeTraffic(G, type, x, y, angle) {
-  const v = createVehicle(type, x, y, angle, { driver: 'traffic' });
-  v.speed = 90;
-  G.vehicles.push(v);
-  return v;
-}
+  detect() {
+    const q = new URLSearchParams(location.search);
+    this.name = q.get('shot');
+    return this.name;
+  },
 
-function placePolice(G, x, y, angle, pursuit = true) {
-  const v = createVehicle('police', x, y, angle, { driver: pursuit ? 'police' : 'block', parked: !pursuit });
-  G.vehicles.push(v);
-  if (pursuit) G.police.cars.push(v);
-  return v;
-}
+  // Called by main once the world exists and state is 'playing'.
+  setup(G) {
+    const W = CVH.world, L = W.landmarks, P = CVH.playerCtl;
+    const cam = CVH.camera;
+    G.frozen = true;
+    const place = (car, x, z, heading) => {
+      car.group.position.set(x, 0, z);
+      car.heading = heading; car.group.rotation.y = heading;
+      car.vel.set(0, 0, 0);
+      return car;
+    };
+    const trafficAt = (type, x, z, heading, color) => {
+      const car = CVH.vehicles.create(type, { driver: 'traffic', x, z, heading, color });
+      G.scene.add(car.group); G.cars.push(car);
+      return car;
+    };
 
-export function setupShot(G, name) {
-  const p = G.player;
-  G.state = 'playing';
-  G.save.cash = 1250;
-
-  if (name === 'cover') {
-    // Morning downtown: the player on foot, traffic flowing, the whole
-    // HUD live and Marisol's marker on the minimap.
-    G.dayT = 0.30;
-    p.x = vRoadX(4) - 6; // middle of the downtown intersection, clear of rooftops
-    p.y = hRoadY(3) + 10;
-    p.angle = -0.5;
-    p.weapon = 'pistol';
-    placeTraffic(G, 'sedan', vRoadX(4) - 10, hRoadY(3) - 150, Math.PI / 2);
-    placeTraffic(G, 'taxi', vRoadX(4) + 16, hRoadY(3) + 190, -Math.PI / 2);
-    placeTraffic(G, 'sport', vRoadX(3) + 120, hRoadY(3) - 16, 0);
-    G.save.cash = 1250;
-  }
-
-  if (name === 'chase') {
-    // Four stars on a downtown avenue: pursuit behind, a roadblock
-    // ahead, skid marks under the tyres, escape banner up.
-    G.dayT = 0.44;
-    const car = createVehicle('sport', vRoadX(2) + 320, hRoadY(3) - 18, 0, { color: '#e83e2e' });
-    car.speed = 305;
-    G.vehicles.push(car);
-    p.vehicle = car;
-    p.x = car.x; p.y = car.y;
-    setStars(G, 4);
-    placePolice(G, car.x - 120, car.y + 26, 0.12);
-    placePolice(G, car.x - 210, car.y - 30, -0.08);
-    placePolice(G, car.x - 300, car.y + 8, 0.04);
-    const bx = vRoadX(5), by = hRoadY(3);
-    const block = [];
-    for (let k = -1; k <= 1; k++) block.push(placePolice(G, bx, by + k * 25, Math.PI / 2, false));
-    G.police.roadblock = { cars: block, x: bx, y: by };
-    G.fx.skidTrail(car.x - 26, car.y + 9, 0, 190);
-    G.fx.skidTrail(car.x - 26, car.y - 9, 0, 150);
-    G.fx.sparks(car.x - 30, car.y + 12, Math.PI, 14);
-    G.objectiveOverride = { x: null, y: null, text: 'SHAKE THE HEAT — lose the police!', timer: null };
-    G.save.cash = 3420;
-  }
-
-  if (name === 'dusk') {
-    // The coastal avenue at dusk: lamps lit, headlights on, palms
-    // silhouetted against the sea.
-    G.dayT = 0.70;
-    const car = createVehicle('sedan', vRoadX(9) - 16, hRoadY(4) - 60, Math.PI / 2, { color: '#4a7fb5' });
-    car.speed = 150;
-    G.vehicles.push(car);
-    p.vehicle = car;
-    p.x = car.x; p.y = car.y;
-    const ahead = placeTraffic(G, 'sedan', vRoadX(9) - 16, hRoadY(4) + 190, Math.PI / 2);
-    ahead.speed = 120;
-    const north = placeTraffic(G, 'taxi', vRoadX(9) + 16, hRoadY(4) - 260, -Math.PI / 2);
-    north.speed = 110;
-    G.save.cash = 2080;
-  }
-
-  if (name === 'mission') {
-    // Mid-delivery in Marisol's "Hot Lunch": taxi flying downtown,
-    // gold marker across the map, 54 seconds on the banner clock.
-    G.dayT = 0.38;
-    G.missions.startAt(1); // Hot Lunch
-    const A = G.missions.active;
-    A.idx = 1; // already collected; the timed delivery stage is live
-    A.stages[1].timeLeft = 54;
-    const car = createVehicle('taxi', vRoadX(5) + 60, hRoadY(2) - 17, 0, {});
-    car.speed = 215;
-    G.vehicles.push(car);
-    p.vehicle = car;
-    p.x = car.x; p.y = car.y;
-    placeTraffic(G, 'sedan', vRoadX(5) - 190, hRoadY(2) + 17, Math.PI);
-    placeTraffic(G, 'sport', vRoadX(6) + 40, hRoadY(2) + 17, Math.PI);
-    G.save.cash = 860;
-  }
-}
+    if (this.name === 'cover') {
+      // Street level downtown: hero on foot in the foreground, avenue of
+      // towers ahead, traffic rolling past, Marisol's marker across town.
+      P.pos.set(0, 0, 40);
+      P.heading = Math.PI;
+      P.weapon = 'pistol';
+      P.h.group.rotation.y = P.heading;
+      P.h.rArm.rotation.x = -1.45;         // gun arm up, mid-patrol pose
+      trafficAt('sedan', 3.4, 18, Math.PI, 0x3d7bd9);
+      trafficAt('taxi', -3.4, 64, 0, undefined);
+      trafficAt('sport', 3.4, -20, Math.PI, 0xd94f3d);
+      CVH.missions.jobIndex = 0;
+      cam.yaw = Math.PI; cam.pitch = 0.3; cam.dist = 8.5;
+      cam.snap(P.pos);
+      G.cash = 350;
+    } else if (this.name === 'drive') {
+      // Behind a sport coupe at speed on the coastal avenue at golden light.
+      const car = trafficAt('sport', 251.4, 120, Math.PI, 0x8e5bd6);
+      car.driver = 'player';
+      G.playerCar = car;
+      P.h.group.visible = false;
+      car.vel.set(0, 0, -24);
+      trafficAt('sedan', 251.4, 55, Math.PI, 0xf2f0e6);
+      trafficAt('moto', 244.6, 48, 0, 0x3fae6a);
+      G.dayT = 0.385;                      // late golden afternoon, sun low
+      cam.yaw = Math.PI; cam.pitch = 0.3;
+      cam.snap(car.group.position);
+      G.cash = 780;
+    } else if (this.name === 'chase') {
+      // Four stars: pursuit cars with flashing bars boxing the player in.
+      const car = trafficAt('sport', 62, 3.4, Math.PI / 2, 0xd92323);
+      car.driver = 'player';
+      G.playerCar = car;
+      P.h.group.visible = false;
+      car.vel.set(20, 0, 0);
+      // Roadblock ahead with light bars facing the camera, one car alongside.
+      const cop1 = CVH.vehicles.create('police', { driver: 'police', x: 82, z: 0.2, heading: -Math.PI / 2 + 0.25 });
+      const cop2 = CVH.vehicles.create('police', { driver: 'police', x: 84, z: 7.6, heading: -Math.PI / 2 - 0.3 });
+      const cop3 = CVH.vehicles.create('police', { driver: 'police', x: 63, z: 9.6, heading: Math.PI / 2 });
+      for (const c of [cop1, cop2, cop3]) { G.scene.add(c.group); G.cars.push(c); CVH.police.cars.push(c); }
+      CVH.police.setHeat(CVH.police.THRESH[4] + 6);
+      // The finale's "shake the heat" step gives the banner its chase text.
+      CVH.missions.jobIndex = 5;
+      CVH.missions.active = { job: CVH.missions.JOBS[5], steps: CVH.missions.JOBS[5].steps(L), stepIdx: 4, timer: 0 };
+      CVH.fx.burst(72, 0.6, 6, { count: 8, color: 0xffb347, spread: 2, up: 2, life: 3 });
+      cam.yaw = Math.PI / 2; cam.pitch = 0.34; cam.dist = 12.5;
+      cam.snap(car.group.position);
+      G.cash = 1130;
+    } else if (this.name === 'mission') {
+      // Timed job: taxi flying toward the gold pillar, timer on the banner.
+      // Westbound on the z=124 avenue: the gold pillar stands dead ahead.
+      const car = trafficAt('taxi', -30, 120.6, -1.6, undefined);
+      car.driver = 'player';
+      G.playerCar = car;
+      P.h.group.visible = false;
+      car.vel.set(-17, 0, -0.5);
+      CVH.missions.jobIndex = 1;
+      CVH.missions.active = {
+        job: CVH.missions.JOBS[1],
+        steps: CVH.missions.JOBS[1].steps(L),
+        stepIdx: 1, timer: 54,
+      };
+      cam.yaw = -1.6; cam.pitch = 0.3;
+      cam.snap(car.group.position);
+      G.cash = 560;
+    }
+    // A few skid marks under fast cars sell the speed in stills.
+    if (this.name === 'drive' || this.name === 'chase') CVH.fx.addShake(0.12);
+  },
+};

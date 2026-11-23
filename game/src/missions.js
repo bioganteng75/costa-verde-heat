@@ -1,342 +1,267 @@
-// missions.js — work in Costa Verde.
-// A seven-job story chain for fixer Marisol Vega (gold M marker at the
-// safehouse), taxi fares flagged by pedestrians, and a three-race
-// street series with checkpoint rings. Owns the objective logic the
-// HUD displays: story stage first, then race, then taxi, then Marisol.
+// missions.js — Marisol Vega's story chain, taxi fares, and the glowing
+// objective markers. A job is a list of steps; each step is one objective
+// (go somewhere, steal a car, escape through gates, shake the heat).
+window.CVH = window.CVH || {};
 
-import { vRoadX, hRoadY, blockX, blockY, BLOCK, ROAD_W, CYCLE, COLS, ROWS } from './world.js';
-import { createVehicle } from './vehicles.js';
-import { setStars } from './police.js';
+CVH.missions = {
+  jobIndex: 0,          // next story job to offer
+  active: null,         // {job, stepIdx, stepT, timer}
+  taxi: null,           // {stage:'pickup'|'dropoff', ped, dest, t}
+  _marker: null, _ring: null,
+  storyDone: false,
 
-function inter(i, j) { return { x: vRoadX(i), y: hRoadY(j) }; }
-function corner(i, j, c) {
-  const bx = blockX(i), by = blockY(j);
-  return { x: c % 2 === 0 ? bx + 10 : bx + BLOCK - 10, y: c < 2 ? by + 10 : by + BLOCK - 10 };
-}
-
-function storyDefs(G) {
-  const S = G.world.services;
-  const marina = { x: S.marina.x, y: S.marina.y - 20 };
-  const spray = { x: S.paynspray.x + S.paynspray.w / 2, y: S.paynspray.y + S.paynspray.h / 2 };
-  return [
+  JOBS: [
     {
-      name: 'First Run', reward: 400,
-      intro: 'Marisol: "Simple start, driver. Pick up the package downtown, drop it at the marina. No drama."',
-      stages: [
-        { type: 'goto', ...corner(4, 2, 0), text: 'Pick up the package' },
-        { type: 'goto', ...marina, text: 'Deliver to the marina' },
+      name: 'First Run', pay: 220,
+      intro: 'Marisol: "Simple, chico. Pick up the package at the marina pier and drop it at Hotel Sol. Do not dent the day."',
+      steps: (L) => [
+        { type: 'goto', x: L.marina.x, z: L.marina.z, label: 'Pick up the package at the marina' },
+        { type: 'goto', x: L.hotel.x, z: L.hotel.z, label: 'Deliver to Hotel Sol' },
       ],
     },
     {
-      name: 'Hot Lunch', reward: 600,
-      intro: 'Marisol: "A very impatient man at Hotel Sol wants his lunch. It stays hot for ninety seconds."',
-      stages: [
-        { type: 'goto', x: G.world.stands[2].x, y: G.world.stands[2].y, text: 'Collect the delivery' },
-        { type: 'goto', ...inter(8, 2), text: 'Deliver to Hotel Sol — fast!', time: 95 },
+      name: 'Hot Lunch', pay: 340,
+      intro: 'Marisol: "A very impatient man wants his lunch across town. Ninety-five seconds. The clock is already rude."',
+      steps: (L) => [
+        { type: 'goto', x: L.foodStands[0].x, z: L.foodStands[0].z, label: 'Pick up the lunch order' },
+        { type: 'goto', x: -114, z: 118, label: 'Deliver the lunch — fast!', time: 95 },
       ],
     },
     {
-      name: 'Three Drops', reward: 900,
-      intro: 'Marisol: "Three drops, three corners of my city. Quiet work — try not to make the news."',
-      stages: [
-        { type: 'goto', ...corner(2, 2, 3), text: 'Drop 1 of 3' },
-        { type: 'goto', ...corner(7, 4, 0), text: 'Drop 2 of 3' },
-        { type: 'goto', ...corner(3, 6, 1), text: 'Drop 3 of 3' },
+      name: 'Three Drops', pay: 520,
+      intro: 'Marisol: "Three drops, three corners of my city. Quiet driving, clean hands."',
+      steps: (L) => [
+        { type: 'goto', x: 10, z: -176, label: 'Drop one: south market corner' },
+        { type: 'goto', x: -176, z: -52, label: 'Drop two: west docks road' },
+        { type: 'goto', x: 118, z: 176, label: 'Drop three: palmera heights' },
       ],
     },
     {
-      name: 'Borrowed Wheels', reward: 1200,
-      intro: 'Marisol: "A red sport coupe near the south avenue. Borrow it. Bring it to the spray shop in one piece."',
-      stages: [
-        {
-          type: 'steal', ...inter(7, 5), text: 'Steal the sport coupe',
-          onStart(m, stage) {
-            const car = createVehicle('sport', stage.x + 14, stage.y - 14, Math.PI / 2, { parked: true, color: '#e83e2e' });
-            car.missionCar = true;
-            G.vehicles.push(car);
-            stage.car = car;
-          },
-        },
-        { type: 'goto', ...spray, text: 'Deliver it to the Pay \'n Spray', needsCar: true },
+      name: 'Coupe de Ville', pay: 700,
+      intro: 'Marisol: "A red coupe near Banco Verde belongs to a man who owes me. Take it. Bring it to my garage unbroken."',
+      steps: (L) => [
+        { type: 'steal', x: 58, z: 58, label: 'Steal the red coupe by Banco Verde' },
+        { type: 'goto', x: L.garageDrop.x, z: L.garageDrop.z, label: 'Deliver the coupe to the garage', needCar: 'stealTarget' },
       ],
     },
     {
-      name: 'Coastal Circuit', reward: 1500, timeLimit: 150,
-      intro: 'Marisol: "My friends bet on lap times now. Six gates, coast and downtown. Show them something."',
-      stages: [
-        { type: 'goto', ...inter(8, 6), text: 'Gate 1 — south coast' },
-        { type: 'goto', ...inter(8, 3), text: 'Gate 2 — mid coast' },
-        { type: 'goto', ...inter(8, 0), text: 'Gate 3 — north coast' },
-        { type: 'goto', ...inter(5, 0), text: 'Gate 4 — north avenue' },
-        { type: 'goto', ...inter(2, 1), text: 'Gate 5 — old town' },
-        { type: 'goto', ...inter(4, 3), text: 'Final gate — the bank' },
+      name: 'Marina Heat', pay: 950,
+      intro: 'Marisol: "The marina pickup will trip an alarm. You will be hot. Lose them or outrun them — just bring it home."',
+      steps: (L) => [
+        { type: 'goto', x: L.marina.x, z: L.marina.z, label: 'Grab the marina package', alarm: true },
+        { type: 'goto', x: L.safehouse.x, z: L.safehouse.z, label: 'Bring it to the safehouse' },
       ],
     },
     {
-      name: 'Marina Heat', reward: 2000,
-      intro: 'Marisol: "The marina pickup will trip an alarm. Take the heat, lose nobody, deliver to the bank."',
-      stages: [
-        { type: 'goto', ...marina, text: 'Pick up at the marina' },
-        {
-          type: 'goto', x: S.bank.x, y: S.bank.y, text: 'Deliver to Banco Verde',
-          onStart() { setStars(G, 3); G.toast('Alarm tripped — the marina job is hot!', '#ff9a8a'); },
-        },
+      name: 'Verde Sunset', pay: 1600,
+      intro: 'Marisol: "One last drive, chico. Through every gate I lit for you, then disappear, then home. We retire loud."',
+      steps: (L) => [
+        { type: 'goto', x: 186, z: -124, label: 'Gate one: north-east crossing' },
+        { type: 'goto', x: -62, z: -186, label: 'Gate two: south causeway' },
+        { type: 'goto', x: -186, z: 62, label: 'Gate three: west palms' },
+        { type: 'goto', x: 62, z: 186, label: 'Gate four: marina road south' },
+        { type: 'shake', label: 'Shake the heat — get unseen and cool off' },
+        { type: 'goto', x: L.safehouse.x, z: L.safehouse.z, label: 'Home. Bring it home.' },
       ],
     },
-    {
-      name: 'The Vault', reward: 5000, timeLimit: 420,
-      intro: 'Marisol: "One last score, driver. The vault at Banco Verde. Then you disappear — that is the job."',
-      stages: [
-        { type: 'goto', x: S.bank.x, y: S.bank.y, text: 'Reach Banco Verde' },
-        {
-          type: 'goto', ...inter(2, 3), text: 'Escape — checkpoint 1',
-          onStart() { setStars(G, 4); G.toast('Vault cracked — RUN!', '#ff9a8a'); },
-        },
-        { type: 'goto', ...inter(1, 5), text: 'Escape — checkpoint 2' },
-        { type: 'goto', ...inter(6, 6), text: 'Escape — checkpoint 3' },
-        { type: 'shake', text: 'Shake the heat completely' },
-        { type: 'goto', x: S.safehouse.x - 40, y: S.safehouse.y + 30, text: 'Get home to the safehouse' },
-      ],
-    },
-  ];
-}
+  ],
 
-function raceDefs() {
-  return [
-    { name: 'Palms Sprint', purse: 800, par: 95, start: inter(8, 6), cps: [inter(8, 4), inter(8, 2), inter(8, 0), inter(6, 0)] },
-    { name: 'Downtown Dash', purse: 1200, par: 120, start: inter(2, 1), cps: [inter(4, 1), inter(4, 3), inter(2, 3), inter(2, 5), inter(4, 5)] },
-    { name: 'Grand Verde Tour', purse: 1800, par: 170, start: inter(1, 6), cps: [inter(4, 6), inter(7, 5), inter(8, 3), inter(6, 1), inter(3, 0), inter(1, 2)] },
-  ];
-}
+  init(scene) {
+    // Objective marker: a tall light pillar + ground ring, visible city-wide.
+    const geo = new THREE.CylinderGeometry(1.6, 2.6, 42, 12, 1, true);
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffc93f, transparent: true, opacity: 0.34, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+    this._marker = new THREE.Mesh(geo, mat);
+    this._marker.position.y = 21;
+    this._marker.visible = false;
+    scene.add(this._marker);
+    this._ring = new THREE.Mesh(
+      new THREE.RingGeometry(3.4, 4.4, 32),
+      new THREE.MeshBasicMaterial({ color: 0xffc93f, transparent: true, opacity: 0.8, side: THREE.DoubleSide })
+    );
+    this._ring.rotation.x = -Math.PI / 2;
+    this._ring.position.y = 0.07;
+    this._ring.visible = false;
+    scene.add(this._ring);
+  },
 
-export function createMissions(G) {
-  const M = {
-    defs: storyDefs(G),
-    races: raceDefs(),
-    active: null,      // { def, idx, stages, timeLeft }
-    taxi: { phase: 'none', ped: null, dest: null, t: 0, base: 0, offerT: 0 },
-    taxiT: 9,
-    race: null,        // { def, idx, t }
-  };
-
-  function anchor() { return G.player.vehicle || G.player; }
-  function distTo(x, y) { const a = anchor(); return Math.hypot(a.x - x, a.y - y); }
-
-  // Directly begin a story job (used by the screenshot scenes).
-  M.startAt = function (idx) {
-    G.save.missionIndex = idx;
-    startMission(idx);
-  };
-
-  function startMission(idx) {
-    const def = M.defs[idx];
-    const stages = def.stages.map((s) => ({ ...s }));
-    M.active = { def, idx: 0, stages, timeLeft: def.timeLimit || null };
-    G.toast(def.name, '#ffd76a', 3.2);
-    G.toast(def.intro, '#ffffff', 5.5);
-    const st = stages[0];
-    if (st.onStart) st.onStart(M, st);
-    G.audio.start();
-  }
-
-  function completeMission() {
-    const { def } = M.active;
-    M.active = null;
-    G.save.missionIndex++;
-    G.addCash(def.reward, `Job done: ${def.name}`);
-    G.toast('Marisol: "Good work, driver."', '#7dff9a', 4);
-    G.persist();
-  }
-
-  function failMission(why) {
-    G.toast(`Job failed — ${why}`, '#ff9a8a', 4);
-    G.audio.fail();
-    if (M.active) {
-      const st = M.active.stages[M.active.idx];
-      if (st && st.car && st.car.missionCar) {
-        const gi = G.vehicles.indexOf(st.car);
-        if (gi >= 0 && G.player.vehicle !== st.car) G.vehicles.splice(gi, 1);
-      }
+  // The point the HUD, minimap and marker should all point at right now.
+  objective() {
+    const G = CVH.G, L = CVH.world.landmarks;
+    if (this.active) {
+      const s = this.active.steps[this.active.stepIdx];
+      if (s.type === 'shake') return { x: null, z: null, label: s.label, shake: true };
+      return { x: s.x, z: s.z, label: s.label, timer: s.time ? this.active.timer : null };
     }
-    M.active = null;
-  }
-
-  M.update = function (dt) {
-    const S = G.world.services;
-    // --- story ------------------------------------------------------------
-    if (!M.active) {
-      if (G.save.missionIndex < M.defs.length && distTo(S.marisol.x, S.marisol.y) < 48) {
-        startMission(G.save.missionIndex);
-      }
-    } else {
-      const A = M.active;
-      if (A.timeLeft !== null) {
-        A.timeLeft -= dt;
-        if (A.timeLeft <= 0) { failMission('out of time'); return; }
-      }
-      const st = A.stages[A.idx];
-      if (st.time !== undefined && st.timeLeft === undefined) st.timeLeft = st.time;
-      if (st.timeLeft !== undefined) {
-        st.timeLeft -= dt;
-        if (st.timeLeft <= 0) { failMission('out of time'); return; }
-      }
-      let done = false;
-      if (st.type === 'goto') {
-        if (st.needsCar) {
-          // Must arrive in the car stolen during the previous stage,
-          // and it has to be in decent shape.
-          const prev = A.stages[A.idx - 1];
-          done = !!(prev && prev.car && G.player.vehicle === prev.car && distTo(st.x, st.y) < 60);
-          if (done && prev.car.hp < prev.car.maxHp * 0.4) { failMission('the coupe is wrecked'); return; }
-        } else {
-          done = distTo(st.x, st.y) < 56;
-        }
-      } else if (st.type === 'steal') {
-        done = !!(st.car && G.player.vehicle === st.car);
-      } else if (st.type === 'shake') {
-        done = G.police.stars === 0;
-      }
-      if (done) {
-        A.idx++;
-        G.audio.pickup();
-        if (A.idx >= A.stages.length) { completeMission(); return; }
-        const nx = A.stages[A.idx];
-        if (nx.onStart) nx.onStart(M, nx);
-        if (nx.text) G.toast(nx.text, '#ffd76a', 3);
-      }
+    if (this.taxi) {
+      if (this.taxi.stage === 'pickup') return { x: this.taxi.ped.pos.x, z: this.taxi.ped.pos.z, label: 'Pick up your fare', taxi: true };
+      return { x: this.taxi.dest.x, z: this.taxi.dest.z, label: 'Drop off your fare', taxi: true, timer: this.taxi.t };
     }
+    if (this.jobIndex < this.JOBS.length) {
+      return { x: L.safehouse.x, z: L.safehouse.z, label: 'Meet Marisol at the safehouse', marisol: true };
+    }
+    return null;
+  },
 
-    // --- street races -------------------------------------------------------
-    if (!M.race && !M.active) {
-      for (const r of M.races) {
-        if (G.player.vehicle && Math.abs(G.player.vehicle.speed) < 34 && distTo(r.start.x, r.start.y) < 44) {
-          M.race = { def: r, idx: 0, t: 0 };
-          G.toast(`Race: ${r.name} — beat ${r.par}s for $${r.purse}`, '#8ad2ff', 4.5);
-          G.audio.start();
-          break;
-        }
+  startJob(idx) {
+    const G = CVH.G, L = CVH.world.landmarks;
+    const job = this.JOBS[idx];
+    this.active = { job, steps: job.steps(L), stepIdx: 0, timer: 0 };
+    const s = this.active.steps[0];
+    if (s.time) this.active.timer = s.time;
+    if (s.type === 'steal') this._spawnStealCar(s);
+    CVH.hud.toast(job.name, job.intro, 5200);
+    CVH.audio.ui();
+  },
+
+  _spawnStealCar(step) {
+    const G = CVH.G;
+    const car = CVH.vehicles.create('sport', { color: 0xd92323, driver: 'parked', special: 'stealTarget', x: step.x, z: step.z, heading: 0.6 });
+    G.scene.add(car.group);
+    G.cars.push(car);
+    this.active.stealCar = car;
+  },
+
+  _failJob(reason) {
+    CVH.hud.toast('Job failed', reason + ' Head back to Marisol to try again.', 4200);
+    CVH.audio.jobFail();
+    if (this.active && this.active.stealCar && this.active.stealCar.driver === 'parked') {
+      const i = CVH.G.cars.indexOf(this.active.stealCar);
+      if (i >= 0) { CVH.G.scene.remove(this.active.stealCar.group); CVH.G.cars.splice(i, 1); }
+    }
+    this.active = null;
+  },
+
+  _completeStep() {
+    const G = CVH.G;
+    const a = this.active;
+    a.stepIdx++;
+    if (a.stepIdx >= a.steps.length) {
+      G.addCash(a.job.pay);
+      CVH.hud.toast(a.job.name + ' complete', '+$' + a.job.pay + ' — Marisol sends her love.', 4200);
+      CVH.audio.jobDone();
+      this.jobIndex++;
+      this.active = null;
+      G.saveGame();
+      return;
+    }
+    const s = a.steps[a.stepIdx];
+    a.timer = s.time || 0;
+    if (s.type === 'steal') this._spawnStealCar(s);
+    if (s.alarm) { /* alarm handled when the previous step completed */ }
+    CVH.audio.pickup();
+  },
+
+  update(dt) {
+    const G = CVH.G, L = CVH.world.landmarks;
+    const P = CVH.playerCtl;
+    const focus = G.focusPos();
+    // Marker follows the objective
+    const obj = this.objective();
+    if (obj && obj.x !== null && obj.x !== undefined) {
+      this._marker.visible = true; this._ring.visible = true;
+      this._marker.position.x = obj.x; this._marker.position.z = obj.z;
+      this._marker.material.color.setHex(obj.taxi ? 0x59d6ff : 0xffc93f);
+      this._ring.position.x = obj.x; this._ring.position.z = obj.z;
+      this._ring.material.color.setHex(obj.taxi ? 0x59d6ff : 0xffc93f);
+    } else { this._marker.visible = false; this._ring.visible = false; }
+
+    // Taxi lifecycle ------------------------------------------------------------
+    this._updateTaxi(dt);
+
+    // Story jobs ------------------------------------------------------------------
+    if (!this.active) {
+      // Standing in Marisol's ring starts the next job.
+      if (this.jobIndex < this.JOBS.length &&
+          CVH.util.dist2D(focus.x, focus.z, L.safehouse.x, L.safehouse.z) < 5 && G.focusSpeed() < 2) {
+        this.startJob(this.jobIndex);
       }
-    } else if (M.race) {
-      const R = M.race;
-      R.t += dt;
-      if (!G.player.vehicle) {
-        G.toast('Race abandoned', '#ff9a8a', 2.5);
-        M.race = null;
+      return;
+    }
+    const a = this.active;
+    const s = a.steps[a.stepIdx];
+    if (s.time) {
+      a.timer -= dt;
+      if (a.timer <= 0) { this._failJob('Out of time.'); return; }
+    }
+    if (s.type === 'shake') {
+      if (CVH.police.stars === 0) this._completeStep();
+      return;
+    }
+    if (s.type === 'steal') {
+      if (G.playerCar && G.playerCar.special === 'stealTarget') {
+        CVH.hud.toast('Got it', 'Now deliver it — gently. She said unbroken.', 2600);
+        this._completeStep();
+      } else if (a.stealCar && a.stealCar.dead) {
+        this._failJob('The coupe is wrecked.');
+      }
+      return;
+    }
+    // goto steps
+    if (s.needCar === 'stealTarget' && !(G.playerCar && G.playerCar.special === 'stealTarget')) {
+      if (a.stealCar && a.stealCar.dead) this._failJob('The coupe is wrecked.');
+      return;
+    }
+    if (CVH.util.dist2D(focus.x, focus.z, s.x, s.z) < 6) {
+      if (s.alarm) {
+        CVH.police.setHeat(Math.max(CVH.police.heat, CVH.police.THRESH[3] + 4));
+        CVH.hud.toast('Alarm!', 'The marina screams. Drive, chico, drive!', 3000);
+      }
+      this._completeStep();
+    }
+  },
+
+  _updateTaxi(dt) {
+    const G = CVH.G;
+    if (this.taxi) {
+      const t = this.taxi;
+      if (t.stage === 'pickup') {
+        // Cancel if the fare got knocked down or the player wanders off.
+        if (t.ped.state === 'down') { this.taxi = null; CVH.hud.toast('Fare lost', 'Your passenger is on the pavement. Classy.', 2600); return; }
+        if (G.playerCar && CVH.util.dist2D(G.playerCar.group.position.x, G.playerCar.group.position.z, t.ped.pos.x, t.ped.pos.z) < 5 && G.playerCar.speed2D() < 2) {
+          t.stage = 'dropoff';
+          t.t = 75;
+          t.ped.h.group.visible = false;             // seated in the car
+          const W = CVH.world;
+          const ix = W.roadXs[1 + Math.floor(Math.random() * (W.roadXs.length - 2))];
+          const iz = W.roadZs[1 + Math.floor(Math.random() * (W.roadZs.length - 2))];
+          t.dest = { x: ix, z: iz };
+          CVH.hud.toast('Taxi', 'Your fare wants the corner of ' + Math.round(ix) + ' / ' + Math.round(iz) + '. Tip grows with speed.', 3400);
+          CVH.audio.pickup();
+        }
       } else {
-        const cp = R.def.cps[R.idx];
-        if (distTo(cp.x, cp.y) < 60) {
-          R.idx++;
-          G.audio.pickup();
-          G.fx.sparkle(cp.x, cp.y, 16);
-          if (R.idx >= R.def.cps.length) {
-            if (R.t <= R.def.par) {
-              G.addCash(R.def.purse, `${R.def.name} won in ${R.t.toFixed(1)}s`);
-              if (!G.save.racesWon.includes(R.def.name)) { G.save.racesWon.push(R.def.name); G.persist(); }
-            } else {
-              G.toast(`Finished in ${R.t.toFixed(1)}s — too slow for the purse`, '#ffd76a', 4);
-            }
-            M.race = null;
-          }
+        t.t -= dt;
+        if (!G.playerCar) { /* passenger waits in the car; timer keeps ticking */ }
+        if (G.playerCar && CVH.util.dist2D(G.playerCar.group.position.x, G.playerCar.group.position.z, t.dest.x, t.dest.z) < 7 && G.playerCar.speed2D() < 3) {
+          const fare = 60 + Math.max(0, Math.round(t.t)) * 2;
+          G.addCash(fare);
+          CVH.hud.toast('Fare paid', '+$' + fare + (t.t > 25 ? ' — generous tip for the hurry.' : '.'), 3000);
+          CVH.audio.cash();
+          t.ped.h.group.visible = true;
+          t.ped.pos.set(t.dest.x + 3, 0, t.dest.z + 3);
+          t.ped.state = 'walk'; t.ped.target = null;
+          this.taxi = null;
+          G.saveGame();
+        } else if (t.t <= 0) {
+          CVH.hud.toast('Fare walked', 'Too slow — they got out at a light.', 2600);
+          t.ped.h.group.visible = true;
+          if (G.playerCar) t.ped.pos.set(G.playerCar.group.position.x + 3, 0, G.playerCar.group.position.z + 3);
+          t.ped.state = 'walk'; t.ped.target = null;
+          this.taxi = null;
         }
       }
+      return;
     }
-
-    // --- taxi fares -----------------------------------------------------------
-    const T = M.taxi;
-    if (T.phase === 'none' && !M.active) {
-      M.taxiT -= dt;
-      if (M.taxiT <= 0) {
-        M.taxiT = 16 + Math.random() * 10;
-        let best = null, bd = 520;
-        for (const p of G.peds) {
-          if (p.state !== 'walk' || p.fare || p.hidden) continue;
-          const d = Math.hypot(p.x - G.player.x, p.y - G.player.y);
-          if (d < bd) { bd = d; best = p; }
-        }
-        if (best) { best.fare = true; T.ped = best; T.phase = 'offer'; T.offerT = 26; }
-      }
-    } else if (T.phase === 'offer') {
-      T.offerT -= dt;
-      if (T.offerT <= 0 || !T.ped || T.ped.state !== 'walk') {
-        if (T.ped) T.ped.fare = false;
-        T.phase = 'none'; T.ped = null;
-      } else if (G.player.vehicle && Math.abs(G.player.vehicle.speed) < 22 && distTo(T.ped.x, T.ped.y) < 46) {
-        const dest = { x: 0, y: 0 };
-        let guard = 0;
-        do {
-          const pt = inter((Math.random() * (COLS + 1)) | 0, (Math.random() * (ROWS + 1)) | 0);
-          dest.x = pt.x; dest.y = pt.y;
-          guard++;
-        } while (Math.hypot(dest.x - T.ped.x, dest.y - T.ped.y) < 650 && guard < 12);
-        T.dest = dest;
-        T.base = Math.round(Math.hypot(dest.x - T.ped.x, dest.y - T.ped.y) / 8);
-        T.t = 0;
-        T.ped.hidden = true;
-        T.ped.fare = false;
-        T.phase = 'ride';
-        G.toast('Fare picked up — follow the gold marker', '#8ad2ff', 3.5);
-        G.audio.ui();
-      }
-    } else if (T.phase === 'ride') {
-      T.t += dt;
-      if (!G.player.vehicle) {
-        // Passenger bails where the player stopped.
-        T.ped.hidden = false;
-        T.ped.x = G.player.x + 18; T.ped.y = G.player.y + 6;
-        T.ped.state = 'walk';
-        G.toast('Fare bailed out', '#ff9a8a', 2.5);
-        T.phase = 'none'; T.ped = null;
-      } else if (distTo(T.dest.x, T.dest.y) < 56) {
-        // Tip shrinks the longer the ride takes.
-        const tip = Math.max(5, Math.round(T.base * 0.6 - T.t * 0.55));
-        G.addCash(T.base + Math.max(0, tip), 'Taxi fare');
-        T.ped.hidden = false;
-        T.ped.x = T.dest.x + 16; T.ped.y = T.dest.y + 10;
-        T.ped.bi = Math.max(0, Math.min(COLS - 1, Math.floor((T.dest.x - ROAD_W) / CYCLE)));
-        T.ped.bj = Math.max(0, Math.min(ROWS - 1, Math.floor((T.dest.y - ROAD_W) / CYCLE)));
-        T.ped.state = 'walk';
-        T.phase = 'none'; T.ped = null;
+    // Offer a fare every so often: flag a nearby pedestrian with a marker.
+    if (this._taxiCd > 0) { this._taxiCd -= dt; return; }
+    if (CVH.G.playerCar || Math.random() > dt * 0.1) return;
+    for (const ped of CVH.G.peds.list) {
+      if (ped.state === 'walk' && CVH.util.dist2D(ped.pos.x, ped.pos.z, CVH.playerCtl.pos.x, CVH.playerCtl.pos.z) < 30) {
+        this.taxi = { stage: 'pickup', ped, dest: null, t: 0 };
+        this._taxiCd = 45;
+        CVH.hud.toast('Taxi fare', 'A pedestrian is waving you down — stop your car beside them.', 3400);
+        break;
       }
     }
-  };
-
-  // The single objective the HUD should show right now.
-  M.objective = function () {
-    if (M.active) {
-      const A = M.active;
-      const st = A.stages[A.idx];
-      const timer = st.timeLeft !== undefined ? st.timeLeft : A.timeLeft;
-      if (st.type === 'shake') return { x: null, y: null, text: st.text, timer };
-      return { x: st.x, y: st.y, text: `${A.def.name}: ${st.text}`, timer };
-    }
-    if (M.race) {
-      const R = M.race;
-      const cp = R.def.cps[R.idx];
-      return { x: cp.x, y: cp.y, text: `${R.def.name} — gate ${R.idx + 1}/${R.def.cps.length}`, timer: -R.t, par: R.def.par };
-    }
-    if (M.taxi.phase === 'ride') {
-      return { x: M.taxi.dest.x, y: M.taxi.dest.y, text: 'Taxi: drop off your fare', timer: null };
-    }
-    if (G.save.missionIndex < M.defs.length) {
-      const S = G.world.services;
-      return { x: S.marisol.x, y: S.marisol.y, text: `See Marisol Vega — job ${G.save.missionIndex + 1}: ${M.defs[G.save.missionIndex].name}`, timer: null };
-    }
-    return { x: null, y: null, text: 'Costa Verde is yours — races, fares and packages remain', timer: null };
-  };
-
-  // World-space markers the renderer should draw (rings at targets).
-  M.markers = function () {
-    const out = [];
-    const obj = M.objective();
-    if (obj && obj.x !== null && M.active) out.push({ x: obj.x, y: obj.y, color: '#ffd23e', label: 'M' });
-    else if (obj && obj.x !== null && M.race) out.push({ x: obj.x, y: obj.y, color: '#57b6ff', label: '»' });
-    else if (obj && obj.x !== null && M.taxi.phase === 'ride') out.push({ x: obj.x, y: obj.y, color: '#ffd23e', label: '$' });
-    else if (obj && obj.x !== null) out.push({ x: obj.x, y: obj.y, color: '#ffd23e', label: 'M' });
-    if (!M.race && !M.active && !G.shotMode) {
-      for (const r of M.races) out.push({ x: r.start.x, y: r.start.y, color: '#57b6ff', label: 'R', ringOnly: true });
-    }
-    return out;
-  };
-
-  return M;
-}
+  },
+  _taxiCd: 20,
+};

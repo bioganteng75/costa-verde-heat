@@ -1,19 +1,14 @@
-// Costa Verde Heat — hand-in program for the gta6-01 entry (Node 22,
-// standard library only).
+// Costa Verde Heat 3D — hand-in program for the gta6-01 bounty.
 //
-// The game itself is the static site in game/: plain HTML, CSS-free
-// canvas rendering and ES modules, no build step and no network calls.
-// This program packages it for the judges — it copies game/ and
-// screenshots/ into the output directory and writes dossier.json, the
-// machine-readable summary, using the vendored make.fun helper.
+// The game itself is the static site in game/ (open game/index.html in a
+// desktop browser; it needs no server and makes no network requests — the
+// Three.js build it uses is vendored at game/vendor/three.min.js).
+// This program copies game/ and screenshots/ into the output directory and
+// writes dossier.json there with the vendored make.fun library, so the
+// judge receives exactly the caps the scorer enforces.
 //
-// Run it the way the grader does:
-//   node main.ts                          (writes to /output)
-// or locally:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-//
-// To play instead of packaging: `node serve.ts`, then open
-// http://localhost:8080 in a desktop browser.
+//   node serve.ts                                  → play at http://localhost:8080
+//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts   → hand-in rehearsal
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -23,17 +18,16 @@ import { buildDossier } from './vendor/makefun-game.ts';
 const root = fileURLToPath(new URL('.', import.meta.url));
 const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-mkdirSync(outDir, { recursive: true });
-cpSync(join(root, 'game'), join(outDir, 'game'), { recursive: true });
-mkdirSync(join(outDir, 'screenshots'), { recursive: true });
-if (existsSync(join(root, 'screenshots'))) {
-  cpSync(join(root, 'screenshots'), join(outDir, 'screenshots'), { recursive: true });
+for (const part of ['game', 'screenshots']) {
+  if (!existsSync(join(root, part))) {
+    throw new Error(`cannot hand in: ${part}/ is missing beside main.ts`);
+  }
 }
 
-// The caps below mirror the grader's own limits: at most 4 screenshots
-// of 256 KiB each, at most 993 files / 48 MiB under game/, any single
-// game path at most 1000 bytes, and the dossier's text fields capped
-// at 163840 bytes in total.
+mkdirSync(outDir, { recursive: true });
+cpSync(join(root, 'game'), join(outDir, 'game'), { recursive: true });
+cpSync(join(root, 'screenshots'), join(outDir, 'screenshots'), { recursive: true });
+
 const dossier = buildDossier(outDir, {
   text_max_bytes: 163840,
   screenshots: { max: 4, max_bytes: 262144 },
@@ -42,3 +36,4 @@ const dossier = buildDossier(outDir, {
   game_path_max_bytes: 1000,
 });
 writeFileSync(join(outDir, 'dossier.json'), dossier);
+console.log(`Costa Verde Heat 3D handed in at ${outDir} (game/, screenshots/, dossier.json)`);
