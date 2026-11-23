@@ -1,144 +1,100 @@
-// shots.js — deterministic screenshot scenes for Costa Verde Heat.
-// ?shot=cover|chase|dusk|mission&seed=1 arranges real game state — real
-// cars, real police, a real roadblock, a real mission objective, the
-// real HUD — then main.js freezes the action and paints it for the
-// screenshot. Nothing here draws anything the game itself would not
-// draw; even the skid marks and sparks in the chase are laid into the
-// same fx stores the live game fills.
+// shots.js — deterministic screenshot scenes for the entry's gallery.
+// Each scene arranges real game state (real entities, real HUD) and
+// freezes it; main.js renders a few frames and then sets
+// window.__shotReady so the capture script can fire.
 
-import { makeCar } from './vehicles.js';
-import { STORY } from './missions.js';
+import { vRoadX, hRoadY } from './world.js';
+import { createVehicle } from './vehicles.js';
+import { setStars } from './police.js';
 
-function addCar(G, x, y, angle, type, driver, speed = 0) {
-  const car = makeCar(x, y, angle, type, driver);
-  car.speed = speed;
-  G.cars.push(car);
-  return car;
+function placeTraffic(G, type, x, y, angle) {
+  const v = createVehicle(type, x, y, angle, { driver: 'traffic' });
+  v.speed = 90;
+  G.vehicles.push(v);
+  return v;
 }
 
-function scatterPeds(G, cx, cy, n, spread = 190) {
-  let placed = 0;
-  for (const ped of G.peds) {
-    if (placed >= n) break;
-    ped.x = cx + ((placed * 67) % spread) - spread / 2;
-    ped.y = cy + ((placed * 41) % 120) - 60;
-    ped.state = 'walk';
-    ped.tx = ped.x + 60;
-    ped.ty = ped.y + 20;
-    placed++;
-  }
+function placePolice(G, x, y, angle, pursuit = true) {
+  const v = createVehicle('police', x, y, angle, { driver: pursuit ? 'police' : 'block', parked: !pursuit });
+  G.vehicles.push(v);
+  if (pursuit) G.police.cars.push(v);
+  return v;
 }
 
-/** Lay a curving pair of tyre marks into the fx store, as a slide would. */
-function laySkidTrail(G, x0, y0, x1, y1, bend) {
-  const steps = 34;
-  for (let i = 0; i < steps; i++) {
-    const t = i / steps;
-    const x = x0 + (x1 - x0) * t;
-    const y = y0 + (y1 - y0) * t + Math.sin(t * Math.PI) * bend;
-    const ang = Math.atan2((y1 - y0) + Math.cos(t * Math.PI) * bend * Math.PI * 0.06, x1 - x0);
-    for (const off of [-11, 11]) {
-      G.fx.skids.push({
-        x: x - Math.sin(ang) * off,
-        y: y + Math.cos(ang) * off,
-        ang, a: 0.5,
-      });
-    }
-  }
-}
-
-/** Freeze a burst of collision sparks into the fx store. */
-function laySparks(G, x, y, n = 14) {
-  for (let i = 0; i < n; i++) {
-    const a = Math.random() * Math.PI * 2;
-    const sp = 90 + Math.random() * 240;
-    G.fx.particles.push({
-      kind: 'spark',
-      x, y,
-      vx: Math.cos(a) * sp,
-      vy: Math.sin(a) * sp - 40,
-      life: 0.5, maxLife: 0.58,
-      size: 2 + Math.random() * 2,
-    });
-  }
-}
-
-/** Stage the named scene on a freshly built game state. */
 export function setupShot(G, name) {
   const p = G.player;
   G.state = 'playing';
-  G.shotMode = true;
+  G.save.cash = 1250;
+
+  if (name === 'cover') {
+    // Morning downtown: the player on foot, traffic flowing, the whole
+    // HUD live and Marisol's marker on the minimap.
+    G.dayT = 0.30;
+    p.x = vRoadX(4) - 6; // middle of the downtown intersection, clear of rooftops
+    p.y = hRoadY(3) + 10;
+    p.angle = -0.5;
+    p.weapon = 'pistol';
+    placeTraffic(G, 'sedan', vRoadX(4) - 10, hRoadY(3) - 150, Math.PI / 2);
+    placeTraffic(G, 'taxi', vRoadX(4) + 16, hRoadY(3) + 190, -Math.PI / 2);
+    placeTraffic(G, 'sport', vRoadX(3) + 120, hRoadY(3) - 16, 0);
+    G.save.cash = 1250;
+  }
 
   if (name === 'chase') {
-    // Four stars: a borrowed Deportivo outruns three patrol cars toward
-    // the roadblock sealing the next avenue — and the barrier wins ties.
-    const car = addCar(G, 1650, 1400, 0, 'sport', 'player', 430);
-    p.car = car;
+    // Four stars on a downtown avenue: pursuit behind, a roadblock
+    // ahead, skid marks under the tyres, escape banner up.
+    G.dayT = 0.44;
+    const car = createVehicle('sport', vRoadX(2) + 320, hRoadY(3) - 18, 0, { color: '#e83e2e' });
+    car.speed = 305;
+    G.vehicles.push(car);
+    p.vehicle = car;
     p.x = car.x; p.y = car.y;
-    p.cash = 1240;
-    G.wanted.heat = 4.4;
-    G.wanted.stars = 4;
-    const c1 = addCar(G, 1425, 1332, 0.22, 'police', 'police', 385);
-    const c2 = addCar(G, 1395, 1472, -0.2, 'police', 'police', 370);
-    const c3 = addCar(G, 1528, 1120, Math.PI / 2 + 0.25, 'police', 'police', 300);
-    G.police.push(c1, c2, c3);
-    // The roadblock: two patrol cars parked across the avenue ahead.
-    const b1 = addCar(G, 2086, 1356, Math.PI / 2, 'police', 'block', 0);
-    const b2 = addCar(G, 2086, 1444, -Math.PI / 2, 'police', 'block', 0);
-    G.roadblocks.push({ cars: [b1, b2], x: 2100, y: 1400 });
-    // The slide that started it all, still smoking on the asphalt.
-    laySkidTrail(G, 1210, 1470, 1635, 1405, -34);
-    laySparks(G, 1420, 1300, 16);
-    // The "Heat Check" escape step gives the banner its objective.
-    G.missions.storyIndex = 2;
-    G.missions.active = { def: STORY[2], stepIndex: 1, stepT: 0, cpIndex: 0 };
-    const civ = addCar(G, 1500, 1080, Math.PI / 2, 'sedan', 'traffic', 120);
-    civ.braking = true;
-    scatterPeds(G, 1750, 1560, 4);
-    return;
+    setStars(G, 4);
+    placePolice(G, car.x - 120, car.y + 26, 0.12);
+    placePolice(G, car.x - 210, car.y - 30, -0.08);
+    placePolice(G, car.x - 300, car.y + 8, 0.04);
+    const bx = vRoadX(5), by = hRoadY(3);
+    const block = [];
+    for (let k = -1; k <= 1; k++) block.push(placePolice(G, bx, by + k * 25, Math.PI / 2, false));
+    G.police.roadblock = { cars: block, x: bx, y: by };
+    G.fx.skidTrail(car.x - 26, car.y + 9, 0, 190);
+    G.fx.skidTrail(car.x - 26, car.y - 9, 0, 150);
+    G.fx.sparks(car.x - 30, car.y + 12, Math.PI, 14);
+    G.objectiveOverride = { x: null, y: null, text: 'SHAKE THE HEAT — lose the police!', timer: null };
+    G.save.cash = 3420;
   }
 
   if (name === 'dusk') {
-    // Golden hour on the coastal avenue: headlights on, the sea going
-    // dark, a truck ambling home and the whole city lit amber.
-    G.forceDusk = 1;
-    const car = addCar(G, 2350, 2280, 0, 'sport', 'player', 380);
-    p.car = car;
+    // The coastal avenue at dusk: lamps lit, headlights on, palms
+    // silhouetted against the sea.
+    G.dayT = 0.70;
+    const car = createVehicle('sedan', vRoadX(9) - 16, hRoadY(4) - 60, Math.PI / 2, { color: '#4a7fb5' });
+    car.speed = 150;
+    G.vehicles.push(car);
+    p.vehicle = car;
     p.x = car.x; p.y = car.y;
-    p.cash = 860;
-    const truck = addCar(G, 2760, 2252, 0, 'truck', 'traffic', 130);
-    truck.braking = true;
-    addCar(G, 1980, 2308, Math.PI, 'sedan', 'traffic', 150);
-    addCar(G, 2215, 2348, 0.4, 'moto', null, 0); // parked by the sand
-    scatterPeds(G, 2560, 2430, 5, 260);
-    return;
+    const ahead = placeTraffic(G, 'sedan', vRoadX(9) - 16, hRoadY(4) + 190, Math.PI / 2);
+    ahead.speed = 120;
+    const north = placeTraffic(G, 'taxi', vRoadX(9) + 16, hRoadY(4) - 260, -Math.PI / 2);
+    north.speed = 110;
+    G.save.cash = 2080;
   }
 
   if (name === 'mission') {
-    // Seconds left on Marisol's hot-package run, marina dead ahead.
-    const car = addCar(G, 2790, 2300, 0.35, 'taxi', 'player', 265);
-    p.car = car;
+    // Mid-delivery in Marisol's "Hot Lunch": taxi flying downtown,
+    // gold marker across the map, 54 seconds on the banner clock.
+    G.dayT = 0.38;
+    G.missions.startAt(1); // Hot Lunch
+    const A = G.missions.active;
+    A.idx = 1; // already collected; the timed delivery stage is live
+    A.stages[1].timeLeft = 54;
+    const car = createVehicle('taxi', vRoadX(5) + 60, hRoadY(2) - 17, 0, {});
+    car.speed = 215;
+    G.vehicles.push(car);
+    p.vehicle = car;
     p.x = car.x; p.y = car.y;
-    p.cash = 410;
-    G.missions.storyIndex = 1;
-    G.missions.active = { def: STORY[1], stepIndex: 1, stepT: 41, cpIndex: 0 };
-    addCar(G, 2620, 2210, 0, 'sedan', 'traffic', 90);
-    addCar(G, 3060, 2260, Math.PI, 'moto', 'traffic', 160);
-    scatterPeds(G, 3050, 2380, 4, 140);
-    return;
+    placeTraffic(G, 'sedan', vRoadX(5) - 190, hRoadY(2) + 17, Math.PI);
+    placeTraffic(G, 'sport', vRoadX(6) + 40, hRoadY(2) + 17, Math.PI);
+    G.save.cash = 860;
   }
-
-  // "cover" (and any unknown name): Rafe on foot in the downtown
-  // canyon, towers overhead, traffic rolling past and Marisol's first
-  // job waiting up north — close enough to point an arrow at.
-  p.x = 2165;
-  p.y = 1475;
-  p.angle = -0.7;
-  p.cash = 235;
-  addCar(G, 2072, 1180, Math.PI / 2, 'sedan', 'traffic', 120);
-  addCar(G, 2128, 1660, -Math.PI / 2, 'taxi', 'traffic', 125);
-  addCar(G, 1850, 1372, Math.PI, 'sport', 'traffic', 140);
-  addCar(G, 2480, 1428, 0, 'sedan', 'traffic', 115);
-  addCar(G, 2235, 1335, 0, 'moto', null, 0); // parked, stealable
-  scatterPeds(G, 2240, 1520, 7);
 }

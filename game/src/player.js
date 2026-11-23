@@ -1,411 +1,355 @@
-// player.js — Rafe Solano on foot: movement, sprinting, fists and the
-// gun table, health and pickups. Pedestrians live here too: they stroll
-// the sidewalks, chat in pairs, and run when the day turns dangerous.
-//
-// v2 kit: the pistol gains a sibling — an SMG that fires three times as
-// fast with a loose spread and eats ammo to match. Food stands heal for
-// cash, getting hurt stamps a timer the HUD turns into a red vignette,
-// and every shot reports its muzzle flash to the effects layer.
+// player.js — the player on foot, twin-stick combat, bullets, and the
+// pedestrians who fill Costa Verde's sidewalks.
+// The player walks with WASD, aims with the mouse, and fights with
+// fists, a pistol or an SMG. Pedestrians wander block perimeters,
+// flee danger, and can be flagged as taxi fares by the missions code.
 
-import { collideCircle, isOnRoad, isSand, isWater } from './world.js';
-import { keyDown } from './input.js';
-import { Sound } from './audio.js';
+import { collideCircle, blockX, blockY, BLOCK, COLS, ROWS } from './world.js';
+import { vehicleRadius } from './vehicles.js';
 
-/** The gun table: cadence, bullet speed, damage, spread, sound. */
-export const WEAPONS = {
-  fists: { cd: 0.34, label: 'Fists' },
-  pistol: { cd: 0.24, speed: 920, dmg: 16, spread: 0.012, label: 'Pistol' },
-  smg: { cd: 0.085, speed: 990, dmg: 9, spread: 0.075, label: 'SMG' },
-};
+const SKIN = ['#f2c79b', '#c98d5f', '#8a5a34', '#6e4525', '#ffd9b3'];
+const SHIRTS = ['#e8574a', '#4a90d9', '#f2b13c', '#57b06a', '#e8e4da', '#9a6fd0', '#3fbfae', '#e87fa5', '#5a6b7a'];
 
-export function createPlayer(x, y) {
+export function createPlayer(world) {
+  const s = world.services.safehouse;
   return {
-    x, y, angle: -Math.PI / 2, r: 14,
+    x: s.x - 60, y: s.y + 34,
+    angle: -Math.PI / 2,
+    r: 11,
     hp: 100, maxHp: 100,
-    cash: 60,
-    weapon: 'fists', ammo: 0,
-    car: null, dead: false,
-    attackCd: 0, hurtCd: 0,
-    hurtT: 99,       // seconds since the last hit, drives the vignette
-    walkCycle: 0,
+    weapon: 'fists', // 'fists' | 'pistol' | 'smg'
+    vehicle: null,
+    walkPhase: 0,
+    fireCd: 0,
+    punchT: 0,
+    hurtT: 0,
+    dead: false,
   };
 }
 
-export function createPedestrians(city, count, rng) {
-  const peds = [];
-  const shirts = ['#ef5350', '#ab47bc', '#42a5f5', '#66bb6a', '#ffa726', '#ec407a', '#8d6e63', '#26a69a', '#ffee58'];
-  for (let i = 0; i < count; i++) {
-    let x = 0;
-    let y = 0;
-    for (let tries = 0; tries < 20; tries++) {
-      x = 120 + rng() * 3360;
-      y = 120 + rng() * 2100;
-      if (!isOnRoad(x, y)) break;
-    }
-    peds.push({
-      x, y, angle: rng() * Math.PI * 2, r: 11,
-      speed: 42 + rng() * 30,
-      color: shirts[(rng() * shirts.length) | 0],
-      skin: ['#f1c27d', '#e0ac69', '#c68642', '#8d5524', '#ffdbac'][(rng() * 5) | 0],
-      state: 'walk', tx: x, ty: y, waitT: rng() * 3,
-      fleeT: 0, dangerX: 0, dangerY: 0, down: false, downT: 0,
-      walkCycle: rng() * 6,
-    });
-  }
-  return peds;
-}
+// --- bullets ------------------------------------------------------------------
 
-export function pedestrianFlee(peds, x, y, radius) {
-  for (const p of peds) {
-    if (p.down) continue;
-    const d = Math.hypot(p.x - x, p.y - y);
-    if (d < radius) {
-      p.state = 'flee';
-      p.fleeT = 1.6 + Math.random() * 1.2;
-      p.dangerX = x;
-      p.dangerY = y;
-    }
-  }
-}
+export const bullets = [];
 
-export function updatePedestrians(G, dt) {
-  const city = G.city;
-  for (const p of G.peds) {
-    if (p.down) {
-      p.downT -= dt;
-      if (p.downT <= 0) { p.down = false; p.state = 'walk'; }
-      continue;
-    }
-    p.walkCycle += dt * (p.state === 'flee' ? 13 : 7);
-    if (p.state === 'flee') {
-      p.fleeT -= dt;
-      const a = Math.atan2(p.y - p.dangerY, p.x - p.dangerX);
-      p.angle = a;
-      p.x += Math.cos(a) * 165 * dt;
-      p.y += Math.sin(a) * 165 * dt;
-      if (p.fleeT <= 0) p.state = 'walk';
-    } else {
-      const dx = p.tx - p.x;
-      const dy = p.ty - p.y;
-      const d = Math.hypot(dx, dy);
-      if (d < 12 || p.waitT <= 0) {
-        // Pick a new stroll target nearby, biased to pavements.
-        for (let tries = 0; tries < 8; tries++) {
-          const nx = p.x + (Math.random() - 0.5) * 460;
-          const ny = p.y + (Math.random() - 0.5) * 460;
-          if (nx > 30 && ny > 30 && ny < 2330 && !isWater(nx, ny)) { p.tx = nx; p.ty = ny; break; }
-        }
-        p.waitT = 4 + Math.random() * 6;
-      }
-      p.waitT -= dt;
-      if (d >= 12) {
-        p.angle = Math.atan2(dy, dx);
-        p.x += Math.cos(p.angle) * p.speed * dt;
-        p.y += Math.sin(p.angle) * p.speed * dt;
-      }
-    }
-    const pos = { x: p.x, y: p.y };
-    collideCircle(city, pos, p.r);
-    p.x = pos.x; p.y = pos.y;
-  }
-}
-
-export function drawPedestrian(ctx, p, cam) {
-  const sx = p.x - cam.x;
-  const sy = p.y - cam.y;
-  ctx.save();
-  ctx.translate(sx, sy);
-  if (p.down) {
-    ctx.rotate(Math.PI / 2);
-    ctx.fillStyle = p.color;
-    ctx.fillRect(-10, -5, 20, 10);
-    ctx.fillStyle = p.skin;
-    ctx.beginPath();
-    ctx.arc(13, 0, 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-    return;
-  }
-  const bob = Math.sin(p.walkCycle) * 1.6;
-  ctx.fillStyle = 'rgba(40,30,10,0.25)';
-  ctx.beginPath();
-  ctx.ellipse(0, 8, 10, 4, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.rotate(p.angle + Math.PI / 2);
-  ctx.fillStyle = '#37474f';
-  ctx.fillRect(-6, 1 + Math.abs(bob) * 0.4, 5, 9);
-  ctx.fillRect(1, 1 - Math.abs(bob) * 0.4, 5, 9);
-  ctx.fillStyle = p.color;
-  ctx.beginPath();
-  ctx.arc(0, -1, 8, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = p.skin;
-  ctx.beginPath();
-  ctx.arc(0, -9 + bob * 0.3, 5.5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-}
-
-export function drawPlayer(ctx, player, cam, time) {
-  if (player.car) return;
-  const sx = player.x - cam.x;
-  const sy = player.y - cam.y;
-  ctx.save();
-  ctx.translate(sx, sy);
-  const bob = Math.sin(player.walkCycle) * 1.8;
-  ctx.fillStyle = 'rgba(40,30,10,0.3)';
-  ctx.beginPath();
-  ctx.ellipse(0, 9, 11, 4.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.rotate(player.angle + Math.PI / 2);
-  // Legs in dark jeans, animated by the walk cycle.
-  ctx.fillStyle = '#263238';
-  ctx.fillRect(-7, 2 + Math.abs(bob) * 0.5, 6, 10);
-  ctx.fillRect(1, 2 - Math.abs(bob) * 0.5, 6, 10);
-  // Sunset-orange shirt: Rafe is easy to spot in a crowd.
-  ctx.fillStyle = '#ff7043';
-  ctx.beginPath();
-  ctx.arc(0, -1, 9.5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#e64a19';
-  ctx.fillRect(-9.5, -3, 19, 4);
-  // Head.
-  ctx.fillStyle = '#c68642';
-  ctx.beginPath();
-  ctx.arc(0, -10 + bob * 0.3, 6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#212121';
-  ctx.fillRect(-6, -16 + bob * 0.3, 12, 4);
-  // The aiming arm carries whatever the gun table says he holds.
-  if (player.weapon === 'pistol' || player.weapon === 'smg') {
-    ctx.fillStyle = '#c68642';
-    ctx.fillRect(-2, -22, 4, 12);
-    ctx.fillStyle = '#263238';
-    if (player.weapon === 'smg') {
-      ctx.fillRect(-2.6, -33, 5.2, 12);      // long body
-      ctx.fillRect(-1.2, -24, 2.4, 6);       // magazine
-    } else {
-      ctx.fillRect(-2, -27, 4, 6);
-    }
-  }
-  ctx.restore();
-  if (player.hurtT < 0.45) {
-    ctx.strokeStyle = 'rgba(255,40,40,0.7)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(sx, sy, 20 + Math.sin(time * 20) * 3, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-}
-
-/** Melee and gunfire. Returns nothing; effects land on G directly. */
-export function playerAttack(G, aimAngle) {
-  const p = G.player;
-  if (p.attackCd > 0 || p.car || p.dead) return;
-  const gun = WEAPONS[p.weapon];
-  if (gun && gun.speed && p.ammo > 0) {
-    p.attackCd = gun.cd;
-    p.ammo -= 1;
-    if (p.weapon === 'smg') Sound.smgShot();
-    else Sound.shot();
-    const a = aimAngle + (Math.random() - 0.5) * 2 * gun.spread;
-    const mx = p.x + Math.cos(aimAngle) * 20;
-    const my = p.y + Math.sin(aimAngle) * 20;
-    G.bullets.push({
-      x: mx, y: my,
-      vx: Math.cos(a) * gun.speed,
-      vy: Math.sin(a) * gun.speed,
-      dmg: gun.dmg,
-      life: 0.55,
-    });
-    G.onMuzzle?.(mx, my, aimAngle);
-    G.onCrime?.(2.2, p.x, p.y, true);
-    pedestrianFlee(G.peds, p.x, p.y, 260);
-    if (p.ammo === 0) p.weapon = 'fists';
-    return;
-  }
-  // Fists.
-  p.attackCd = WEAPONS.fists.cd;
-  Sound.punch();
-  const hx = p.x + Math.cos(aimAngle) * 30;
-  const hy = p.y + Math.sin(aimAngle) * 30;
-  for (const ped of G.peds) {
-    if (!ped.down && Math.hypot(ped.x - hx, ped.y - hy) < 30) {
-      ped.down = true;
-      ped.downT = 5;
-      Sound.hit();
-      G.onCrime?.(2.4, p.x, p.y, true);
-      pedestrianFlee(G.peds, p.x, p.y, 200);
-      return;
-    }
-  }
-  for (const car of G.cars) {
-    if (Math.hypot(car.x - hx, car.y - hy) < car.w * 0.62) {
-      car.health -= 6;
-      Sound.hit();
-      G.onSpark?.(hx, hy);
-      G.onCrime?.(0.8, p.x, p.y, true);
-      return;
-    }
-  }
+export function fireBullet(G, x, y, angle, speed = 760) {
+  bullets.push({ x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, life: 0.62 });
 }
 
 export function updateBullets(G, dt) {
-  for (let i = G.bullets.length - 1; i >= 0; i--) {
-    const b = G.bullets[i];
+  const world = G.world;
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
     b.x += b.vx * dt;
     b.y += b.vy * dt;
     b.life -= dt;
     let dead = b.life <= 0;
     if (!dead) {
-      for (const ped of G.peds) {
-        if (!ped.down && Math.hypot(ped.x - b.x, ped.y - b.y) < 13) {
-          ped.down = true;
-          ped.downT = 8;
-          G.onCrime?.(2.5, b.x, b.y, true);
+      for (const bd of world.buildings) {
+        if (b.x > bd.x && b.x < bd.x + bd.w && b.y > bd.y && b.y < bd.y + bd.h) {
+          G.fx.sparks(b.x, b.y, Math.atan2(-b.vy, -b.vx), 4);
           dead = true;
           break;
         }
       }
     }
     if (!dead) {
-      for (const car of G.cars) {
-        if (Math.hypot(car.x - b.x, car.y - b.y) < car.w * 0.55) {
-          car.health -= b.dmg ?? 16;
-          G.onSpark?.(b.x, b.y);
-          if (car.type === 'police') G.onCrime?.(2.5, b.x, b.y, true);
-          if (car.health <= 0) car.wrecked = true;
+      for (const p of G.peds) {
+        if (p.state === 'down' || p.hidden) continue;
+        if (Math.hypot(p.x - b.x, p.y - b.y) < 11) {
+          hurtPed(G, p, 46, b.x - b.vx * 0.02, b.y - b.vy * 0.02);
           dead = true;
           break;
         }
       }
     }
-    if (dead) G.bullets.splice(i, 1);
+    if (!dead) {
+      for (const v of G.vehicles) {
+        if (v === (G.player && G.player.vehicle)) continue;
+        if (Math.hypot(v.x - b.x, v.y - b.y) < vehicleRadius(v)) {
+          v.hp -= 7;
+          G.fx.sparks(b.x, b.y, Math.atan2(-b.vy, -b.vx), 5);
+          if (v.type === 'police') G.police.reportCrime(G, 'shots', b.x, b.y, true);
+          dead = true;
+          break;
+        }
+      }
+    }
+    if (dead) bullets.splice(i, 1);
   }
 }
 
-export function drawBullets(ctx, G, cam) {
-  ctx.strokeStyle = '#ffe082';
-  ctx.lineWidth = 2.5;
-  for (const b of G.bullets) {
-    ctx.beginPath();
-    ctx.moveTo(b.x - cam.x, b.y - cam.y);
-    ctx.lineTo(b.x - b.vx * 0.016 - cam.x, b.y - b.vy * 0.016 - cam.y);
-    ctx.stroke();
+export function drawBullets(ctx, cam) {
+  ctx.fillStyle = '#ffe27a';
+  for (const b of bullets) {
+    ctx.fillRect(b.x - cam.x - 2, b.y - cam.y - 1, 4, 2);
   }
 }
 
-/** On-foot movement, interactions and pickups for one frame. */
-export function updatePlayerOnFoot(G, dt, aimAngle) {
+// --- player -------------------------------------------------------------------
+
+export function updatePlayer(G, dt) {
   const p = G.player;
-  if (p.dead) return;
-  p.attackCd = Math.max(0, p.attackCd - dt);
-  p.hurtCd = Math.max(0, p.hurtCd - dt);
-  p.hurtT += dt;
+  const inp = G.input;
+  p.fireCd = Math.max(0, p.fireCd - dt);
+  p.punchT = Math.max(0, p.punchT - dt);
+  p.hurtT = Math.max(0, p.hurtT - dt);
+  if (p.vehicle) return;
 
-  let mx = 0;
-  let my = 0;
-  if (keyDown('w', 'arrowup')) my -= 1;
-  if (keyDown('s', 'arrowdown')) my += 1;
-  if (keyDown('a', 'arrowleft')) mx -= 1;
-  if (keyDown('d', 'arrowright')) mx += 1;
+  let mx = 0, my = 0;
+  if (inp.down('KeyW') || inp.down('ArrowUp')) my -= 1;
+  if (inp.down('KeyS') || inp.down('ArrowDown')) my += 1;
+  if (inp.down('KeyA') || inp.down('ArrowLeft')) mx -= 1;
+  if (inp.down('KeyD') || inp.down('ArrowRight')) mx += 1;
   const moving = mx !== 0 || my !== 0;
-  const sprint = keyDown('shift');
-  const speed = sprint ? 262 : 158;
   if (moving) {
     const len = Math.hypot(mx, my);
-    p.x += (mx / len) * speed * dt;
-    p.y += (my / len) * speed * dt;
-    p.walkCycle += dt * (sprint ? 13 : 9);
-    if (!keyDown('mouse')) p.angle = Math.atan2(my, mx);
-    // Sprinting across the sand kicks up little puffs of it.
-    if (sprint && isSand(p.x, p.y) && Math.random() < dt * 9) {
-      G.onDust?.(p.x, p.y + 8, 1);
-    }
-  }
-  // Face the mouse while a gun is drawn.
-  if (p.weapon === 'pistol' || p.weapon === 'smg') p.angle = aimAngle;
-
-  const pos = { x: p.x, y: p.y };
-  collideCircle(G.city, pos, p.r);
-  p.x = pos.x; p.y = pos.y;
-
-  // Cars are solid to walk into.
-  for (const car of G.cars) {
-    const dx = p.x - car.x;
-    const dy = p.y - car.y;
-    const rr = car.w * 0.5 + p.r * 0.7;
-    const d2 = dx * dx + dy * dy;
-    if (d2 < rr * rr && d2 > 0.01) {
-      const d = Math.sqrt(d2);
-      p.x = car.x + (dx / d) * rr;
-      p.y = car.y + (dy / d) * rr;
-    }
+    mx /= len; my /= len;
+    const sprint = inp.down('ShiftLeft') || inp.down('ShiftRight');
+    const speed = sprint ? 240 : 152;
+    p.x += mx * speed * dt;
+    p.y += my * speed * dt;
+    p.walkPhase += dt * (sprint ? 13 : 9.5);
+    const res = collideCircle(G.world, p.x, p.y, p.r, 30);
+    p.x = res.x; p.y = res.y;
+    if (!inp.mouse.down) p.angle = Math.atan2(my, mx);
   }
 
-  // Food stands: a hot plate for $10, if Rafe is hurt and can pay.
-  for (const s of G.city.foodStands) {
-    s.cd = Math.max(0, s.cd - dt);
-    if (s.cd <= 0 && Math.hypot(s.x - p.x, s.y - p.y) < 34) {
-      if (p.hp < p.maxHp && p.cash >= 10) {
-        p.cash -= 10;
-        p.hp = Math.min(p.maxHp, p.hp + 40);
-        s.cd = 25;
-        Sound.heal();
-        G.onSparkle?.(p.x, p.y - 10, '#69f0ae');
-        G.toast?.(`${s.label}: hot food, +40 health (−$10)`);
-      } else if (p.hp < p.maxHp) {
-        G.toast?.(`${s.label}: $10 a plate — you are short`);
-        s.cd = 4;
+  // Aim at the mouse (world space).
+  const mwx = G.cam.x + inp.mouse.x, mwy = G.cam.y + inp.mouse.y;
+  if (inp.mouse.down || p.weapon !== 'fists') {
+    p.angle = Math.atan2(mwy - p.y, mwx - p.x);
+  }
+
+  // Attack.
+  const attacking = inp.mouse.down || inp.down('Space');
+  if (attacking && p.fireCd <= 0) {
+    if (p.weapon === 'fists') {
+      p.fireCd = 0.34;
+      p.punchT = 0.16;
+      G.audio.punch();
+      const hx = p.x + Math.cos(p.angle) * 24, hy = p.y + Math.sin(p.angle) * 24;
+      let hitSomething = false;
+      for (const ped of G.peds) {
+        if (ped.state === 'down' || ped.hidden) continue;
+        if (Math.hypot(ped.x - hx, ped.y - hy) < 17) {
+          hurtPed(G, ped, 34, p.x, p.y);
+          G.police.reportCrime(G, 'assault', ped.x, ped.y);
+          hitSomething = true;
+        }
       }
-    }
-  }
-
-  // Pickups and packages.
-  for (const pk of G.city.pickups) {
-    if (pk.taken) continue;
-    if (Math.hypot(pk.x - p.x, pk.y - p.y) < 30) {
-      pk.taken = true;
-      if (pk.kind === 'pistol') {
-        p.weapon = 'pistol';
-        p.ammo += 24;
-        G.toast?.('Pistol acquired — click to fire');
-      } else if (pk.kind === 'smg') {
-        p.weapon = 'smg';
-        p.ammo += 90;
-        G.toast?.('SMG acquired — hold click and hose');
-      } else {
-        p.hp = Math.min(p.maxHp, p.hp + 45);
-        G.toast?.('Patched up +45');
+      for (const v of G.vehicles) {
+        if (Math.hypot(v.x - hx, v.y - hy) < vehicleRadius(v) + 6) {
+          v.hp -= 4;
+          G.fx.sparks(hx, hy, p.angle, 4);
+          hitSomething = true;
+        }
       }
-      Sound.pickup();
-      G.onSparkle?.(pk.x, pk.y);
-    }
-  }
-  for (const pkg of G.city.packages) {
-    if (pkg.taken) continue;
-    if (Math.hypot(pkg.x - p.x, pkg.y - p.y) < 28) {
-      pkg.taken = true;
-      p.cash += 50;
-      G.packagesFound += 1;
-      Sound.cash();
-      G.onSparkle?.(pkg.x, pkg.y);
-      G.toast?.(`Cash package found (${G.packagesFound}/${G.city.packages.length}) +$50`);
-      G.saveGame?.();
+      if (hitSomething) G.fx.puff(hx, hy);
+    } else {
+      const isSmg = p.weapon === 'smg';
+      p.fireCd = isSmg ? 0.095 : 0.27;
+      const spread = isSmg ? (Math.random() - 0.5) * 0.11 : (Math.random() - 0.5) * 0.03;
+      const gx = p.x + Math.cos(p.angle) * 16, gy = p.y + Math.sin(p.angle) * 16;
+      fireBullet(G, gx, gy, p.angle + spread);
+      G.fx.muzzle(gx, gy, p.angle);
+      if (isSmg) G.audio.smgShot(); else G.audio.shot();
+      G.police.reportCrime(G, 'shots', p.x, p.y);
+      scarePeds(G, p.x, p.y, 240);
     }
   }
 }
 
-export function hurtPlayer(G, amount) {
+export function drawPlayer(ctx, G, cam) {
   const p = G.player;
-  if (p.dead || p.hurtCd > 0) return;
-  p.hp -= amount;
-  p.hurtCd = 0.7;
-  p.hurtT = 0;
-  Sound.hit();
+  if (p.vehicle) return;
+  const x = p.x - cam.x, y = p.y - cam.y;
+  ctx.fillStyle = 'rgba(30,25,15,0.28)';
+  ctx.beginPath();
+  ctx.ellipse(x, y + 5, 10, 4.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  const bob = Math.sin(p.walkPhase) * 1.4;
+  // Legs.
+  ctx.fillStyle = '#2e3d4d';
+  ctx.fillRect(x - 5 + Math.sin(p.walkPhase) * 3, y + 2, 4, 6);
+  ctx.fillRect(x + 1 - Math.sin(p.walkPhase) * 3, y + 2, 4, 6);
+  // Torso: teal jacket.
+  ctx.fillStyle = p.hurtT > 0.5 ? '#d94f3f' : '#128a7d';
+  ctx.beginPath();
+  ctx.arc(x, y + bob * 0.3, 7.6, 0, Math.PI * 2);
+  ctx.fill();
+  // Arms toward aim; a fist pops out while punching.
+  const ax = Math.cos(p.angle), ay = Math.sin(p.angle);
+  ctx.fillStyle = '#0f6e62';
+  ctx.beginPath();
+  ctx.arc(x + ax * 7 - ay * 4, y + ay * 7 + ax * 4, 3, 0, Math.PI * 2);
+  ctx.arc(x + ax * 7 + ay * 4, y + ay * 7 - ax * 4, 3, 0, Math.PI * 2);
+  ctx.fill();
+  if (p.punchT > 0) {
+    ctx.fillStyle = '#f2c79b';
+    ctx.beginPath();
+    ctx.arc(x + ax * 15, y + ay * 15, 3.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (p.weapon !== 'fists') {
+    ctx.fillStyle = '#20242a';
+    ctx.save();
+    ctx.translate(x + ax * 9, y + ay * 9);
+    ctx.rotate(p.angle);
+    ctx.fillRect(0, -1.6, p.weapon === 'smg' ? 15 : 10, 3.2);
+    ctx.restore();
+  }
+  // Head + cap.
+  ctx.fillStyle = '#f2c79b';
+  ctx.beginPath();
+  ctx.arc(x, y + bob * 0.3, 4.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#e8574a';
+  ctx.beginPath();
+  ctx.arc(x, y + bob * 0.3, 4.4, Math.PI, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(x + ax * 3 - 4, y + bob * 0.3 - 1.4 + ay * 2, 8, 2.4);
+}
+
+// --- pedestrians ----------------------------------------------------------------
+
+export function createPeds(world, n, rng) {
+  const peds = [];
+  for (let k = 0; k < n; k++) {
+    const bi = (rng() * COLS) | 0, bj = (rng() * ROWS) | 0;
+    const p = {
+      x: 0, y: 0, tx: 0, ty: 0,
+      bi, bj,
+      angle: rng() * Math.PI * 2,
+      speed: 52 + rng() * 26,
+      hp: 60,
+      state: 'walk', // 'walk' | 'flee' | 'down'
+      fleeT: 0, downT: 0,
+      dangerX: 0, dangerY: 0,
+      walkPhase: rng() * 6,
+      skin: SKIN[(rng() * SKIN.length) | 0],
+      shirt: SHIRTS[(rng() * SHIRTS.length) | 0],
+      fare: false, hidden: false,
+    };
+    const pt = perimeterPoint(p, rng);
+    p.x = pt.x; p.y = pt.y;
+    const t2 = perimeterPoint(p, rng);
+    p.tx = t2.x; p.ty = t2.y;
+    peds.push(p);
+  }
+  return peds;
+}
+
+function perimeterPoint(p, rng) {
+  const bx = blockX(p.bi), by = blockY(p.bj);
+  const side = (rng() * 4) | 0, t = rng();
+  const inset = 5;
+  if (side === 0) return { x: bx + t * BLOCK, y: by + inset };
+  if (side === 1) return { x: bx + t * BLOCK, y: by + BLOCK - inset };
+  if (side === 2) return { x: bx + inset, y: by + t * BLOCK };
+  return { x: bx + BLOCK - inset, y: by + t * BLOCK };
+}
+
+export function hurtPed(G, p, dmg, fromX, fromY) {
+  if (p.state === 'down') return;
+  p.hp -= dmg;
+  G.fx.puff(p.x, p.y);
   if (p.hp <= 0) {
-    p.hp = 0;
-    p.dead = true;
-    G.onWasted?.();
+    p.state = 'down';
+    p.downT = 7;
+  } else {
+    p.state = 'flee';
+    p.fleeT = 2.6;
+    p.dangerX = fromX; p.dangerY = fromY;
+  }
+}
+
+export function scarePeds(G, x, y, r) {
+  for (const p of G.peds) {
+    if (p.state !== 'walk' || p.hidden) continue;
+    if (Math.hypot(p.x - x, p.y - y) < r) {
+      p.state = 'flee';
+      p.fleeT = 2 + Math.random() * 1.5;
+      p.dangerX = x; p.dangerY = y;
+    }
+  }
+}
+
+export function updatePeds(G, dt) {
+  const rng = Math.random;
+  for (const p of G.peds) {
+    if (p.hidden) continue;
+    if (p.state === 'down') {
+      p.downT -= dt;
+      if (p.downT <= 0) { p.state = 'flee'; p.fleeT = 2; p.hp = 40; p.dangerX = G.player.x; p.dangerY = G.player.y; }
+      continue;
+    }
+    let mvx = 0, mvy = 0, spd = p.speed;
+    if (p.state === 'flee') {
+      p.fleeT -= dt;
+      const dx = p.x - p.dangerX, dy = p.y - p.dangerY;
+      const d = Math.hypot(dx, dy) || 1;
+      mvx = dx / d; mvy = dy / d;
+      spd = 218;
+      if (p.fleeT <= 0) {
+        p.state = 'walk';
+        const t = perimeterPoint(p, rng);
+        p.tx = t.x; p.ty = t.y;
+      }
+    } else {
+      const dx = p.tx - p.x, dy = p.ty - p.y;
+      const d = Math.hypot(dx, dy);
+      if (d < 7) {
+        if (rng() < 0.3) { p.bi = Math.max(0, Math.min(COLS - 1, p.bi + ((rng() * 3) | 0) - 1)); p.bj = Math.max(0, Math.min(ROWS - 1, p.bj + ((rng() * 3) | 0) - 1)); }
+        const t = perimeterPoint(p, rng);
+        p.tx = t.x; p.ty = t.y;
+      } else {
+        mvx = dx / d; mvy = dy / d;
+      }
+    }
+    if (mvx !== 0 || mvy !== 0) {
+      p.angle = Math.atan2(mvy, mvx);
+      p.x += mvx * spd * dt;
+      p.y += mvy * spd * dt;
+      p.walkPhase += dt * (spd > 100 ? 13 : 8);
+      const res = collideCircle(G.world, p.x, p.y, 9, 26);
+      p.x = res.x; p.y = res.y;
+    }
+  }
+}
+
+export function drawPed(ctx, p, cam, tNow) {
+  if (p.hidden) return;
+  const x = p.x - cam.x, y = p.y - cam.y;
+  if (x < -24 || y < -24 || x > cam.vw + 24 || y > cam.vh + 24) return;
+  if (p.state === 'down') {
+    ctx.fillStyle = p.shirt;
+    ctx.beginPath();
+    ctx.ellipse(x, y, 11, 5.5, p.angle, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = p.skin;
+    ctx.beginPath();
+    ctx.arc(x + Math.cos(p.angle) * 11, y + Math.sin(p.angle) * 11, 3.8, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+  ctx.fillStyle = 'rgba(30,25,15,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(x, y + 4.5, 8.5, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  const bob = Math.sin(p.walkPhase) * 1.1;
+  ctx.fillStyle = p.shirt;
+  ctx.beginPath();
+  ctx.arc(x, y + bob * 0.3, 6.8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = p.skin;
+  ctx.beginPath();
+  ctx.arc(x, y + bob * 0.3, 3.9, 0, Math.PI * 2);
+  ctx.fill();
+  if (p.fare) {
+    const bounce = Math.sin(tNow * 5) * 2.5;
+    ctx.fillStyle = '#ffb400';
+    ctx.font = 'bold 17px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('!', x, y - 13 + bounce);
   }
 }

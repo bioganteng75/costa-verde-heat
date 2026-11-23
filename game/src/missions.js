@@ -1,423 +1,342 @@
-// missions.js — the work of Costa Verde: a seven-job story chain for
-// the fixer Marisol Vega, a three-race street series for pure cash, and
-// taxi fares between story beats. Every mission is a list of steps;
-// each step knows its objective text, its map marker, its optional
-// timer and the test that completes it.
+// missions.js — work in Costa Verde.
+// A seven-job story chain for fixer Marisol Vega (gold M marker at the
+// safehouse), taxi fares flagged by pedestrians, and a three-race
+// street series with checkpoint rings. Owns the objective logic the
+// HUD displays: story stage first, then race, then taxi, then Marisol.
 
-import { Sound } from './audio.js';
+import { vRoadX, hRoadY, blockX, blockY, BLOCK, ROAD_W, CYCLE, COLS, ROWS } from './world.js';
+import { createVehicle } from './vehicles.js';
+import { setStars } from './police.js';
 
-export const FIXER_NAME = 'Marisol Vega';
+function inter(i, j) { return { x: vRoadX(i), y: hRoadY(j) }; }
+function corner(i, j, c) {
+  const bx = blockX(i), by = blockY(j);
+  return { x: c % 2 === 0 ? bx + 10 : bx + BLOCK - 10, y: c < 2 ? by + 10 : by + BLOCK - 10 };
+}
 
-export const STORY = [
-  {
-    title: 'First Wheels',
-    intro: 'Marisol: "Rafe, mi amor, a client left a package at the Marina. Fetch it, then bring the car to my taller. Simple money."',
-    reward: 150,
-    steps: [
-      { kind: 'goto', text: 'Go to the Marina Azul pickup', x: 3150, y: 2440, r: 70 },
-      { kind: 'gotoCar', text: 'Drive the package to Taller Vega', x: 2130, y: 330, r: 80 },
-    ],
-  },
-  {
-    title: 'Hot Package',
-    intro: 'Marisol: "This one is warm, cariño. Ninety seconds across town, no stops, no dents in my reputation."',
-    reward: 250,
-    steps: [
-      { kind: 'goto', text: 'Pick up the hot package at Hotel Brisa', x: 940, y: 330, r: 70 },
-      { kind: 'timed', text: 'Deliver to the Marina — fast!', x: 3150, y: 2440, r: 80, time: 95 },
-    ],
-  },
-  {
-    title: 'Heat Check',
-    intro: 'Marisol: "The Policía doubt you still have it. Show them some heat — two stars — then vanish like sea mist."',
-    reward: 300,
-    steps: [
-      { kind: 'reachWanted', text: 'Make some noise: reach 2 wanted stars', stars: 2 },
-      { kind: 'escape', text: 'Lose the police completely' },
-    ],
-  },
-  {
-    title: 'Marina Run',
-    intro: 'Marisol: "A street kid with a stopwatch says nobody can run my checkpoints in time. Prove the kid wrong."',
-    reward: 400,
-    steps: [
-      { kind: 'checkpoints', text: 'Run every checkpoint before the clock dies', time: 110, points: [[330, 330], [1560, 880], [2760, 330], [3360, 1980], [2130, 330]] },
-    ],
-  },
-  {
-    title: 'The Big Getaway',
-    intro: 'Marisol: "The marina safe, Rafe. Every cop in Costa Verde will want a word — give them the view of your taillights."',
-    reward: 800,
-    steps: [
-      { kind: 'goto', text: 'Crack the marina safe', x: 3150, y: 2440, r: 70, alarm: 3 },
-      { kind: 'gotoCar', text: 'Escape to Casa de Rafe with the money', x: 330, y: 2330, r: 85 },
-    ],
-  },
-  {
-    title: 'Marina Pickup Run',
-    intro: 'Marisol: "One more boat came in, and its cargo is already missed by dangerous people. Off the dock, across town, no questions."',
-    reward: 650,
-    steps: [
-      { kind: 'goto', text: 'Grab the cargo at the Marina docks', x: 3150, y: 2440, r: 70, alarm: 1 },
-      { kind: 'timed', text: 'Deliver the cargo to Hotel Coral', x: 2760, y: 360, r: 85, time: 105 },
-    ],
-  },
-  {
-    title: 'Verde Sunset',
-    intro: 'Marisol: "Last job, the real one. We empty the marina vault at sunset, run my escape line, and then — only then — we disappear. ¿Listo?"',
-    reward: 1400,
-    steps: [
-      { kind: 'goto', text: 'Empty the marina vault', x: 3150, y: 2440, r: 70, alarm: 4 },
-      { kind: 'checkpoints', text: 'Run the escape line', time: 125, points: [[2700, 1400], [1500, 1950], [900, 850]] },
-      { kind: 'escape', text: 'Shake the heat before you come home' },
-      { kind: 'gotoCar', text: 'Bring it home to Casa de Rafe', x: 330, y: 2330, r: 85 },
-    ],
-  },
-];
+function storyDefs(G) {
+  const S = G.world.services;
+  const marina = { x: S.marina.x, y: S.marina.y - 20 };
+  const spray = { x: S.paynspray.x + S.paynspray.w / 2, y: S.paynspray.y + S.paynspray.h / 2 };
+  return [
+    {
+      name: 'First Run', reward: 400,
+      intro: 'Marisol: "Simple start, driver. Pick up the package downtown, drop it at the marina. No drama."',
+      stages: [
+        { type: 'goto', ...corner(4, 2, 0), text: 'Pick up the package' },
+        { type: 'goto', ...marina, text: 'Deliver to the marina' },
+      ],
+    },
+    {
+      name: 'Hot Lunch', reward: 600,
+      intro: 'Marisol: "A very impatient man at Hotel Sol wants his lunch. It stays hot for ninety seconds."',
+      stages: [
+        { type: 'goto', x: G.world.stands[2].x, y: G.world.stands[2].y, text: 'Collect the delivery' },
+        { type: 'goto', ...inter(8, 2), text: 'Deliver to Hotel Sol — fast!', time: 95 },
+      ],
+    },
+    {
+      name: 'Three Drops', reward: 900,
+      intro: 'Marisol: "Three drops, three corners of my city. Quiet work — try not to make the news."',
+      stages: [
+        { type: 'goto', ...corner(2, 2, 3), text: 'Drop 1 of 3' },
+        { type: 'goto', ...corner(7, 4, 0), text: 'Drop 2 of 3' },
+        { type: 'goto', ...corner(3, 6, 1), text: 'Drop 3 of 3' },
+      ],
+    },
+    {
+      name: 'Borrowed Wheels', reward: 1200,
+      intro: 'Marisol: "A red sport coupe near the south avenue. Borrow it. Bring it to the spray shop in one piece."',
+      stages: [
+        {
+          type: 'steal', ...inter(7, 5), text: 'Steal the sport coupe',
+          onStart(m, stage) {
+            const car = createVehicle('sport', stage.x + 14, stage.y - 14, Math.PI / 2, { parked: true, color: '#e83e2e' });
+            car.missionCar = true;
+            G.vehicles.push(car);
+            stage.car = car;
+          },
+        },
+        { type: 'goto', ...spray, text: 'Deliver it to the Pay \'n Spray', needsCar: true },
+      ],
+    },
+    {
+      name: 'Coastal Circuit', reward: 1500, timeLimit: 150,
+      intro: 'Marisol: "My friends bet on lap times now. Six gates, coast and downtown. Show them something."',
+      stages: [
+        { type: 'goto', ...inter(8, 6), text: 'Gate 1 — south coast' },
+        { type: 'goto', ...inter(8, 3), text: 'Gate 2 — mid coast' },
+        { type: 'goto', ...inter(8, 0), text: 'Gate 3 — north coast' },
+        { type: 'goto', ...inter(5, 0), text: 'Gate 4 — north avenue' },
+        { type: 'goto', ...inter(2, 1), text: 'Gate 5 — old town' },
+        { type: 'goto', ...inter(4, 3), text: 'Final gate — the bank' },
+      ],
+    },
+    {
+      name: 'Marina Heat', reward: 2000,
+      intro: 'Marisol: "The marina pickup will trip an alarm. Take the heat, lose nobody, deliver to the bank."',
+      stages: [
+        { type: 'goto', ...marina, text: 'Pick up at the marina' },
+        {
+          type: 'goto', x: S.bank.x, y: S.bank.y, text: 'Deliver to Banco Verde',
+          onStart() { setStars(G, 3); G.toast('Alarm tripped — the marina job is hot!', '#ff9a8a'); },
+        },
+      ],
+    },
+    {
+      name: 'The Vault', reward: 5000, timeLimit: 420,
+      intro: 'Marisol: "One last score, driver. The vault at Banco Verde. Then you disappear — that is the job."',
+      stages: [
+        { type: 'goto', x: S.bank.x, y: S.bank.y, text: 'Reach Banco Verde' },
+        {
+          type: 'goto', ...inter(2, 3), text: 'Escape — checkpoint 1',
+          onStart() { setStars(G, 4); G.toast('Vault cracked — RUN!', '#ff9a8a'); },
+        },
+        { type: 'goto', ...inter(1, 5), text: 'Escape — checkpoint 2' },
+        { type: 'goto', ...inter(6, 6), text: 'Escape — checkpoint 3' },
+        { type: 'shake', text: 'Shake the heat completely' },
+        { type: 'goto', x: S.safehouse.x - 40, y: S.safehouse.y + 30, text: 'Get home to the safehouse' },
+      ],
+    },
+  ];
+}
 
-/** The street-race series: three checkpoint courses, run in order. */
-export const RACES = [
-  {
-    name: 'Bahía Sprint',
-    time: 95, reward: 300,
-    points: [[330, 850], [900, 1400], [1500, 850], [2130, 1400], [2700, 850]],
-  },
-  {
-    name: 'Palmera Loop',
-    time: 135, reward: 450,
-    points: [[2700, 330], [3300, 1400], [2700, 2280], [900, 1950], [330, 850]],
-  },
-  {
-    name: 'Costa a Costa',
-    time: 155, reward: 650,
-    points: [[330, 330], [3300, 330], [3300, 2280], [330, 2280], [1560, 1400]],
-  },
-];
+function raceDefs() {
+  return [
+    { name: 'Palms Sprint', purse: 800, par: 95, start: inter(8, 6), cps: [inter(8, 4), inter(8, 2), inter(8, 0), inter(6, 0)] },
+    { name: 'Downtown Dash', purse: 1200, par: 120, start: inter(2, 1), cps: [inter(4, 1), inter(4, 3), inter(2, 3), inter(2, 5), inter(4, 5)] },
+    { name: 'Grand Verde Tour', purse: 1800, par: 170, start: inter(1, 6), cps: [inter(4, 6), inter(7, 5), inter(8, 3), inter(6, 1), inter(3, 0), inter(1, 2)] },
+  ];
+}
 
-export function createMissionState() {
-  return {
-    storyIndex: 0,       // next story mission to offer
-    active: null,        // { def, stepIndex, stepT, cpIndex }
-    phone: null,         // { text, t } toast from the fixer
-    taxi: null,          // { phase: 'pickup'|'dropoff', x, y, fareT }
-    taxiCd: 8,
-    race: null,          // { def, cpIndex, t } while a race is running
-    raceIndex: 0,        // next race in the series to offer
-    racesWon: 0,
-    done: false,
+export function createMissions(G) {
+  const M = {
+    defs: storyDefs(G),
+    races: raceDefs(),
+    active: null,      // { def, idx, stages, timeLeft }
+    taxi: { phase: 'none', ped: null, dest: null, t: 0, base: 0, offerT: 0 },
+    taxiT: 9,
+    race: null,        // { def, idx, t }
   };
-}
 
-function phone(G, text, t = 6) {
-  G.missions.phone = { text, t };
-  Sound.pickup();
-}
+  function anchor() { return G.player.vehicle || G.player; }
+  function distTo(x, y) { const a = anchor(); return Math.hypot(a.x - x, a.y - y); }
 
-export function startStoryMission(G) {
-  const M = G.missions;
-  if (M.active || M.storyIndex >= STORY.length) return false;
-  const def = STORY[M.storyIndex];
-  M.active = { def, stepIndex: 0, stepT: 0, cpIndex: 0 };
-  phone(G, def.intro, 8);
-  return true;
-}
-
-export function currentObjective(G) {
-  const M = G.missions;
-  if (M.race) {
-    const [x, y] = M.race.def.points[M.race.cpIndex];
-    return {
-      text: `${M.race.def.name} — checkpoint ${M.race.cpIndex + 1}/${M.race.def.points.length}`,
-      x, y, timer: M.race.def.time - M.race.t,
-    };
-  }
-  if (M.taxi) {
-    return M.taxi.phase === 'pickup'
-      ? { text: 'Taxi: pick up your passenger', x: M.taxi.x, y: M.taxi.y }
-      : { text: 'Taxi: drop your passenger off', x: M.taxi.x, y: M.taxi.y };
-  }
-  if (!M.active) {
-    if (M.storyIndex < STORY.length) {
-      const lm = G.city.landmarks.fixer;
-      return { text: `Visit Marisol at Taller Vega — "${STORY[M.storyIndex].title}"`, x: lm.x, y: lm.y };
-    }
-    return { text: 'Costa Verde is yours. Races, fares and packages still pay.', x: null, y: null };
-  }
-  const step = M.active.def.steps[M.active.stepIndex];
-  if (step.kind === 'checkpoints') {
-    const [x, y] = step.points[M.active.cpIndex];
-    return { text: `${step.text} (${M.active.cpIndex + 1}/${step.points.length})`, x, y, timer: step.time - M.active.stepT };
-  }
-  return {
-    text: step.text,
-    x: step.x ?? null,
-    y: step.y ?? null,
-    timer: step.kind === 'timed' ? step.time - M.active.stepT : null,
+  // Directly begin a story job (used by the screenshot scenes).
+  M.startAt = function (idx) {
+    G.save.missionIndex = idx;
+    startMission(idx);
   };
-}
 
-/** Where the race series wants the player: live checkpoint or next start. */
-export function raceInfo(G) {
-  const M = G.missions;
-  if (M.race) {
-    const [x, y] = M.race.def.points[M.race.cpIndex];
-    return { x, y, active: true };
+  function startMission(idx) {
+    const def = M.defs[idx];
+    const stages = def.stages.map((s) => ({ ...s }));
+    M.active = { def, idx: 0, stages, timeLeft: def.timeLimit || null };
+    G.toast(def.name, '#ffd76a', 3.2);
+    G.toast(def.intro, '#ffffff', 5.5);
+    const st = stages[0];
+    if (st.onStart) st.onStart(M, st);
+    G.audio.start();
   }
-  const def = RACES[M.raceIndex % RACES.length];
-  return { x: def.points[0][0], y: def.points[0][1], active: false };
-}
 
-function completeStep(G) {
-  const M = G.missions;
-  const a = M.active;
-  Sound.missionDone();
-  a.stepIndex += 1;
-  a.stepT = 0;
-  a.cpIndex = 0;
-  if (a.stepIndex >= a.def.steps.length) {
-    const reward = a.def.reward;
-    G.player.cash += reward;
-    phone(G, `Marisol: "Beautiful work. $${reward} wired, plus my respect."`, 6);
-    G.toast?.(`Job done — "${a.def.title}" (${M.storyIndex + 1}/${STORY.length})`);
+  function completeMission() {
+    const { def } = M.active;
     M.active = null;
-    M.storyIndex += 1;
-    if (M.storyIndex >= STORY.length) {
-      M.done = true;
-      phone(G, 'Marisol: "That is the last of it, Rafe. Costa Verde is ours. The races still run, if your foot gets itchy."', 9);
+    G.save.missionIndex++;
+    G.addCash(def.reward, `Job done: ${def.name}`);
+    G.toast('Marisol: "Good work, driver."', '#7dff9a', 4);
+    G.persist();
+  }
+
+  function failMission(why) {
+    G.toast(`Job failed — ${why}`, '#ff9a8a', 4);
+    G.audio.fail();
+    if (M.active) {
+      const st = M.active.stages[M.active.idx];
+      if (st && st.car && st.car.missionCar) {
+        const gi = G.vehicles.indexOf(st.car);
+        if (gi >= 0 && G.player.vehicle !== st.car) G.vehicles.splice(gi, 1);
+      }
     }
-    G.saveGame?.();
-  } else {
-    const next = a.def.steps[a.stepIndex];
-    if (next.alarm) G.onCrime?.(next.alarm + 1.2, G.player.x, G.player.y, true);
-    phone(G, `Marisol: "Good. Now — ${next.text.toLowerCase()}."`, 5);
-  }
-}
-
-function failStep(G, why) {
-  const M = G.missions;
-  if (!M.active) return;
-  phone(G, `Marisol: "${why} The job resets — come back to my taller and we try again."`, 7);
-  M.active = null;
-  Sound.bustedJingle();
-}
-
-function startRace(G, def) {
-  G.missions.race = { def, cpIndex: 1, t: 0 };
-  Sound.beep(false);
-  G.toast?.(`${def.name} — GO! Beat ${def.time}s for $${def.reward}`);
-}
-
-function finishRace(G) {
-  const M = G.missions;
-  const def = M.race.def;
-  G.player.cash += def.reward;
-  M.racesWon += 1;
-  M.raceIndex = Math.min(RACES.length - 1, M.raceIndex + 1);
-  M.race = null;
-  Sound.missionDone();
-  G.toast?.(`${def.name} won! +$${def.reward} (${M.racesWon} race${M.racesWon > 1 ? 's' : ''} won)`);
-  G.saveGame?.();
-}
-
-function updateRace(G, dt) {
-  const M = G.missions;
-  const p = G.player;
-  const px = p.car ? p.car.x : p.x;
-  const py = p.car ? p.car.y : p.y;
-  if (!M.race) {
-    // The start ring arms itself for any driver who rolls through it.
-    if (M.active || !p.car || G.wanted.stars > 0) return;
-    const def = RACES[M.raceIndex % RACES.length];
-    const [sx, sy] = def.points[0];
-    if (Math.hypot(sx - px, sy - py) < 80 && Math.abs(p.car.speed) > 40) startRace(G, def);
-    return;
-  }
-  const race = M.race;
-  race.t += dt;
-  if (!p.car) {
-    M.race = null;
-    G.toast?.('Race abandoned — you left the car');
-    return;
-  }
-  const [cx, cy] = race.def.points[race.cpIndex];
-  if (Math.hypot(cx - px, cy - py) < 90) {
-    Sound.cash();
-    race.cpIndex += 1;
-    if (race.cpIndex >= race.def.points.length) { finishRace(G); return; }
-  }
-  if (race.t > race.def.time) {
-    G.toast?.(`${race.def.name} — out of time. The ring is still there.`);
-    M.race = null;
-    Sound.bustedJingle();
-  }
-}
-
-export function updateMissions(G, dt) {
-  const M = G.missions;
-  if (M.phone) {
-    M.phone.t -= dt;
-    if (M.phone.t <= 0) M.phone = null;
-  }
-  const p = G.player;
-  const px = p.car ? p.car.x : p.x;
-  const py = p.car ? p.car.y : p.y;
-
-  // Walking into the fixer's marker offers the next story job.
-  if (!M.active && M.storyIndex < STORY.length && !p.car) {
-    const lm = G.city.landmarks.fixer;
-    if (Math.hypot(lm.x - p.x, lm.y - p.y) < 75) startStoryMission(G);
+    M.active = null;
   }
 
-  updateRace(G, dt);
-
-  // Taxi work: passengers appear while Rafe is driving anything with wheels.
-  M.taxiCd -= dt;
-  if (!M.taxi && !M.race && p.car && M.taxiCd <= 0 && G.wanted.stars === 0) {
-    const nodes = G.nodes;
-    const n = nodes[(Math.random() * nodes.length) | 0];
-    M.taxi = { phase: 'pickup', x: n.x + 46, y: n.y + 30, fareT: 0 };
-    phone(G, 'A passenger is hailing you — follow the blue marker.', 5);
-  }
-  if (M.taxi) {
-    const t = M.taxi;
-    if (t.phase === 'pickup') {
-      if (p.car && Math.hypot(t.x - px, t.y - py) < 55 && Math.abs(p.car.speed) < 30) {
-        const nodes = G.nodes;
-        let dest = nodes[(Math.random() * nodes.length) | 0];
-        if (Math.hypot(dest.x - t.x, dest.y - t.y) < 500) dest = nodes[(Math.random() * nodes.length) | 0];
-        t.phase = 'dropoff';
-        t.x = dest.x + 46;
-        t.y = dest.y + 30;
-        t.fareT = 0;
-        Sound.pickup();
-        G.toast?.('Passenger in — drive!');
-      } else if (!p.car) {
-        M.taxi = null;
-        M.taxiCd = 14;
+  M.update = function (dt) {
+    const S = G.world.services;
+    // --- story ------------------------------------------------------------
+    if (!M.active) {
+      if (G.save.missionIndex < M.defs.length && distTo(S.marisol.x, S.marisol.y) < 48) {
+        startMission(G.save.missionIndex);
       }
     } else {
-      t.fareT += dt;
-      if (Math.hypot(t.x - px, t.y - py) < 60) {
-        const fare = Math.max(25, 90 - Math.floor(t.fareT));
-        p.cash += fare;
-        Sound.cash();
-        G.toast?.(`Fare paid +$${fare}`);
-        M.taxi = null;
-        M.taxiCd = 16 + Math.random() * 14;
-        G.saveGame?.();
+      const A = M.active;
+      if (A.timeLeft !== null) {
+        A.timeLeft -= dt;
+        if (A.timeLeft <= 0) { failMission('out of time'); return; }
       }
-    }
-  }
-
-  if (!M.active) return;
-  const a = M.active;
-  const step = a.def.steps[a.stepIndex];
-  a.stepT += dt;
-
-  switch (step.kind) {
-    case 'goto':
-      if (Math.hypot(step.x - px, step.y - py) < step.r) {
-        if (step.alarm) G.onCrime?.(step.alarm + 1.4, px, py, true);
-        completeStep(G);
+      const st = A.stages[A.idx];
+      if (st.time !== undefined && st.timeLeft === undefined) st.timeLeft = st.time;
+      if (st.timeLeft !== undefined) {
+        st.timeLeft -= dt;
+        if (st.timeLeft <= 0) { failMission('out of time'); return; }
       }
-      break;
-    case 'gotoCar':
-      if (!p.car) {
-        if (a.stepT > 1 && Math.hypot(step.x - px, step.y - py) < step.r) {
-          G.toast?.('You need a car for this leg');
+      let done = false;
+      if (st.type === 'goto') {
+        if (st.needsCar) {
+          // Must arrive in the car stolen during the previous stage,
+          // and it has to be in decent shape.
+          const prev = A.stages[A.idx - 1];
+          done = !!(prev && prev.car && G.player.vehicle === prev.car && distTo(st.x, st.y) < 60);
+          if (done && prev.car.hp < prev.car.maxHp * 0.4) { failMission('the coupe is wrecked'); return; }
+        } else {
+          done = distTo(st.x, st.y) < 56;
         }
-      } else if (Math.hypot(step.x - px, step.y - py) < step.r) {
-        completeStep(G);
+      } else if (st.type === 'steal') {
+        done = !!(st.car && G.player.vehicle === st.car);
+      } else if (st.type === 'shake') {
+        done = G.police.stars === 0;
       }
-      break;
-    case 'timed':
-      if (Math.hypot(step.x - px, step.y - py) < step.r) completeStep(G);
-      else if (a.stepT > step.time) failStep(G, 'Too slow, the trail went cold.');
-      break;
-    case 'reachWanted':
-      if (G.wanted.stars >= step.stars) completeStep(G);
-      break;
-    case 'escape':
-      if (G.wanted.stars <= 0 && G.wanted.heat < 0.4) completeStep(G);
-      break;
-    case 'checkpoints': {
-      const [cx, cy] = step.points[a.cpIndex];
-      if (Math.hypot(cx - px, cy - py) < 85) {
-        Sound.cash();
-        a.cpIndex += 1;
-        if (a.cpIndex >= step.points.length) { completeStep(G); break; }
+      if (done) {
+        A.idx++;
+        G.audio.pickup();
+        if (A.idx >= A.stages.length) { completeMission(); return; }
+        const nx = A.stages[A.idx];
+        if (nx.onStart) nx.onStart(M, nx);
+        if (nx.text) G.toast(nx.text, '#ffd76a', 3);
       }
-      if (a.stepT > step.time) failStep(G, 'The stopwatch wins this round.');
-      break;
     }
-    default:
-      break;
-  }
-}
 
-/** The tall gold pillar that marks the current objective in the world. */
-export function drawObjectiveMarker(ctx, G, cam, time) {
-  const obj = currentObjective(G);
-  if (obj.x === null || obj.x === undefined) return;
-  const sx = obj.x - cam.x;
-  const sy = obj.y - cam.y;
-  if (sx < -80 || sy < -80 || sx > cam.vw + 80 || sy > cam.vh + 80) return;
-  const bob = Math.sin(time * 3) * 6;
-  const grad = ctx.createLinearGradient(0, sy - 190, 0, sy);
-  grad.addColorStop(0, 'rgba(255,213,79,0)');
-  grad.addColorStop(1, 'rgba(255,213,79,0.55)');
-  ctx.fillStyle = grad;
-  ctx.fillRect(sx - 13, sy - 190, 26, 190);
-  ctx.strokeStyle = '#ffd54f';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.ellipse(sx, sy, 34, 12, 0, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = '#ffd54f';
-  ctx.beginPath();
-  ctx.moveTo(sx, sy - 46 + bob);
-  ctx.lineTo(sx - 13, sy - 70 + bob);
-  ctx.lineTo(sx + 13, sy - 70 + bob);
-  ctx.closePath();
-  ctx.fill();
-}
+    // --- street races -------------------------------------------------------
+    if (!M.race && !M.active) {
+      for (const r of M.races) {
+        if (G.player.vehicle && Math.abs(G.player.vehicle.speed) < 34 && distTo(r.start.x, r.start.y) < 44) {
+          M.race = { def: r, idx: 0, t: 0 };
+          G.toast(`Race: ${r.name} — beat ${r.par}s for $${r.purse}`, '#8ad2ff', 4.5);
+          G.audio.start();
+          break;
+        }
+      }
+    } else if (M.race) {
+      const R = M.race;
+      R.t += dt;
+      if (!G.player.vehicle) {
+        G.toast('Race abandoned', '#ff9a8a', 2.5);
+        M.race = null;
+      } else {
+        const cp = R.def.cps[R.idx];
+        if (distTo(cp.x, cp.y) < 60) {
+          R.idx++;
+          G.audio.pickup();
+          G.fx.sparkle(cp.x, cp.y, 16);
+          if (R.idx >= R.def.cps.length) {
+            if (R.t <= R.def.par) {
+              G.addCash(R.def.purse, `${R.def.name} won in ${R.t.toFixed(1)}s`);
+              if (!G.save.racesWon.includes(R.def.name)) { G.save.racesWon.push(R.def.name); G.persist(); }
+            } else {
+              G.toast(`Finished in ${R.t.toFixed(1)}s — too slow for the purse`, '#ffd76a', 4);
+            }
+            M.race = null;
+          }
+        }
+      }
+    }
 
-/** The cyan ring of the race series: a start line or a live checkpoint. */
-export function drawRaceMarker(ctx, G, cam, time) {
-  const info = raceInfo(G);
-  const sx = info.x - cam.x;
-  const sy = info.y - cam.y;
-  if (sx < -90 || sy < -90 || sx > cam.vw + 90 || sy > cam.vh + 90) return;
-  const pulse = 1 + Math.sin(time * 4) * 0.1;
-  ctx.strokeStyle = info.active ? '#00e5ff' : 'rgba(0,229,255,0.65)';
-  ctx.lineWidth = info.active ? 4 : 3;
-  ctx.beginPath();
-  ctx.ellipse(sx, sy, 52 * pulse, 20 * pulse, 0, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.fillStyle = '#00e5ff';
-  ctx.font = 'bold 12px system-ui, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(info.active ? 'CHECKPOINT' : 'RACE START', sx, sy - 34 + Math.sin(time * 3) * 3);
-}
+    // --- taxi fares -----------------------------------------------------------
+    const T = M.taxi;
+    if (T.phase === 'none' && !M.active) {
+      M.taxiT -= dt;
+      if (M.taxiT <= 0) {
+        M.taxiT = 16 + Math.random() * 10;
+        let best = null, bd = 520;
+        for (const p of G.peds) {
+          if (p.state !== 'walk' || p.fare || p.hidden) continue;
+          const d = Math.hypot(p.x - G.player.x, p.y - G.player.y);
+          if (d < bd) { bd = d; best = p; }
+        }
+        if (best) { best.fare = true; T.ped = best; T.phase = 'offer'; T.offerT = 26; }
+      }
+    } else if (T.phase === 'offer') {
+      T.offerT -= dt;
+      if (T.offerT <= 0 || !T.ped || T.ped.state !== 'walk') {
+        if (T.ped) T.ped.fare = false;
+        T.phase = 'none'; T.ped = null;
+      } else if (G.player.vehicle && Math.abs(G.player.vehicle.speed) < 22 && distTo(T.ped.x, T.ped.y) < 46) {
+        const dest = { x: 0, y: 0 };
+        let guard = 0;
+        do {
+          const pt = inter((Math.random() * (COLS + 1)) | 0, (Math.random() * (ROWS + 1)) | 0);
+          dest.x = pt.x; dest.y = pt.y;
+          guard++;
+        } while (Math.hypot(dest.x - T.ped.x, dest.y - T.ped.y) < 650 && guard < 12);
+        T.dest = dest;
+        T.base = Math.round(Math.hypot(dest.x - T.ped.x, dest.y - T.ped.y) / 8);
+        T.t = 0;
+        T.ped.hidden = true;
+        T.ped.fare = false;
+        T.phase = 'ride';
+        G.toast('Fare picked up — follow the gold marker', '#8ad2ff', 3.5);
+        G.audio.ui();
+      }
+    } else if (T.phase === 'ride') {
+      T.t += dt;
+      if (!G.player.vehicle) {
+        // Passenger bails where the player stopped.
+        T.ped.hidden = false;
+        T.ped.x = G.player.x + 18; T.ped.y = G.player.y + 6;
+        T.ped.state = 'walk';
+        G.toast('Fare bailed out', '#ff9a8a', 2.5);
+        T.phase = 'none'; T.ped = null;
+      } else if (distTo(T.dest.x, T.dest.y) < 56) {
+        // Tip shrinks the longer the ride takes.
+        const tip = Math.max(5, Math.round(T.base * 0.6 - T.t * 0.55));
+        G.addCash(T.base + Math.max(0, tip), 'Taxi fare');
+        T.ped.hidden = false;
+        T.ped.x = T.dest.x + 16; T.ped.y = T.dest.y + 10;
+        T.ped.bi = Math.max(0, Math.min(COLS - 1, Math.floor((T.dest.x - ROAD_W) / CYCLE)));
+        T.ped.bj = Math.max(0, Math.min(ROWS - 1, Math.floor((T.dest.y - ROAD_W) / CYCLE)));
+        T.ped.state = 'walk';
+        T.phase = 'none'; T.ped = null;
+      }
+    }
+  };
 
-export function drawTaxiMarker(ctx, G, cam, time) {
-  const t = G.missions.taxi;
-  if (!t) return;
-  const sx = t.x - cam.x;
-  const sy = t.y - cam.y;
-  if (sx < -40 || sy < -40 || sx > cam.vw + 40 || sy > cam.vh + 40) return;
-  const bob = Math.sin(time * 3.4) * 5;
-  ctx.fillStyle = '#42a5f5';
-  ctx.beginPath();
-  ctx.arc(sx, sy - 34 + bob, 13, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 14px system-ui, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(t.phase === 'pickup' ? 'P' : 'D', sx, sy - 29 + bob);
-  ctx.strokeStyle = '#42a5f5';
-  ctx.lineWidth = 2.5;
-  ctx.beginPath();
-  ctx.ellipse(sx, sy, 24, 9, 0, 0, Math.PI * 2);
-  ctx.stroke();
+  // The single objective the HUD should show right now.
+  M.objective = function () {
+    if (M.active) {
+      const A = M.active;
+      const st = A.stages[A.idx];
+      const timer = st.timeLeft !== undefined ? st.timeLeft : A.timeLeft;
+      if (st.type === 'shake') return { x: null, y: null, text: st.text, timer };
+      return { x: st.x, y: st.y, text: `${A.def.name}: ${st.text}`, timer };
+    }
+    if (M.race) {
+      const R = M.race;
+      const cp = R.def.cps[R.idx];
+      return { x: cp.x, y: cp.y, text: `${R.def.name} — gate ${R.idx + 1}/${R.def.cps.length}`, timer: -R.t, par: R.def.par };
+    }
+    if (M.taxi.phase === 'ride') {
+      return { x: M.taxi.dest.x, y: M.taxi.dest.y, text: 'Taxi: drop off your fare', timer: null };
+    }
+    if (G.save.missionIndex < M.defs.length) {
+      const S = G.world.services;
+      return { x: S.marisol.x, y: S.marisol.y, text: `See Marisol Vega — job ${G.save.missionIndex + 1}: ${M.defs[G.save.missionIndex].name}`, timer: null };
+    }
+    return { x: null, y: null, text: 'Costa Verde is yours — races, fares and packages remain', timer: null };
+  };
+
+  // World-space markers the renderer should draw (rings at targets).
+  M.markers = function () {
+    const out = [];
+    const obj = M.objective();
+    if (obj && obj.x !== null && M.active) out.push({ x: obj.x, y: obj.y, color: '#ffd23e', label: 'M' });
+    else if (obj && obj.x !== null && M.race) out.push({ x: obj.x, y: obj.y, color: '#57b6ff', label: '»' });
+    else if (obj && obj.x !== null && M.taxi.phase === 'ride') out.push({ x: obj.x, y: obj.y, color: '#ffd23e', label: '$' });
+    else if (obj && obj.x !== null) out.push({ x: obj.x, y: obj.y, color: '#ffd23e', label: 'M' });
+    if (!M.race && !M.active && !G.shotMode) {
+      for (const r of M.races) out.push({ x: r.start.x, y: r.start.y, color: '#57b6ff', label: 'R', ringOnly: true });
+    }
+    return out;
+  };
+
+  return M;
 }
