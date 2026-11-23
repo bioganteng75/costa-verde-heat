@@ -1,10 +1,22 @@
 // player.js — Rafe Solano on foot: movement, sprinting, fists and the
-// pistol, health and pickups. Pedestrians live here too: they stroll the
-// sidewalks, chat in pairs, and run when the day turns dangerous.
+// gun table, health and pickups. Pedestrians live here too: they stroll
+// the sidewalks, chat in pairs, and run when the day turns dangerous.
+//
+// v2 kit: the pistol gains a sibling — an SMG that fires three times as
+// fast with a loose spread and eats ammo to match. Food stands heal for
+// cash, getting hurt stamps a timer the HUD turns into a red vignette,
+// and every shot reports its muzzle flash to the effects layer.
 
-import { collideCircle, isOnRoad, isWater } from './world.js';
+import { collideCircle, isOnRoad, isSand, isWater } from './world.js';
 import { keyDown } from './input.js';
 import { Sound } from './audio.js';
+
+/** The gun table: cadence, bullet speed, damage, spread, sound. */
+export const WEAPONS = {
+  fists: { cd: 0.34, label: 'Fists' },
+  pistol: { cd: 0.24, speed: 920, dmg: 16, spread: 0.012, label: 'Pistol' },
+  smg: { cd: 0.085, speed: 990, dmg: 9, spread: 0.075, label: 'SMG' },
+};
 
 export function createPlayer(x, y) {
   return {
@@ -14,6 +26,7 @@ export function createPlayer(x, y) {
     weapon: 'fists', ammo: 0,
     car: null, dead: false,
     attackCd: 0, hurtCd: 0,
+    hurtT: 99,       // seconds since the last hit, drives the vignette
     walkCycle: 0,
   };
 }
@@ -163,15 +176,20 @@ export function drawPlayer(ctx, player, cam, time) {
   ctx.fill();
   ctx.fillStyle = '#212121';
   ctx.fillRect(-6, -16 + bob * 0.3, 12, 4);
-  // Aiming arm when the pistol is out.
-  if (player.weapon === 'pistol') {
+  // The aiming arm carries whatever the gun table says he holds.
+  if (player.weapon === 'pistol' || player.weapon === 'smg') {
     ctx.fillStyle = '#c68642';
     ctx.fillRect(-2, -22, 4, 12);
-    ctx.fillStyle = '#37474f';
-    ctx.fillRect(-2, -27, 4, 6);
+    ctx.fillStyle = '#263238';
+    if (player.weapon === 'smg') {
+      ctx.fillRect(-2.6, -33, 5.2, 12);      // long body
+      ctx.fillRect(-1.2, -24, 2.4, 6);       // magazine
+    } else {
+      ctx.fillRect(-2, -27, 4, 6);
+    }
   }
   ctx.restore();
-  if (player.hurtCd > 0.55) {
+  if (player.hurtT < 0.45) {
     ctx.strokeStyle = 'rgba(255,40,40,0.7)';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -184,24 +202,30 @@ export function drawPlayer(ctx, player, cam, time) {
 export function playerAttack(G, aimAngle) {
   const p = G.player;
   if (p.attackCd > 0 || p.car || p.dead) return;
-  if (p.weapon === 'pistol' && p.ammo > 0) {
-    p.attackCd = 0.24;
+  const gun = WEAPONS[p.weapon];
+  if (gun && gun.speed && p.ammo > 0) {
+    p.attackCd = gun.cd;
     p.ammo -= 1;
-    Sound.shot();
+    if (p.weapon === 'smg') Sound.smgShot();
+    else Sound.shot();
+    const a = aimAngle + (Math.random() - 0.5) * 2 * gun.spread;
+    const mx = p.x + Math.cos(aimAngle) * 20;
+    const my = p.y + Math.sin(aimAngle) * 20;
     G.bullets.push({
-      x: p.x + Math.cos(aimAngle) * 18,
-      y: p.y + Math.sin(aimAngle) * 18,
-      vx: Math.cos(aimAngle) * 900,
-      vy: Math.sin(aimAngle) * 900,
+      x: mx, y: my,
+      vx: Math.cos(a) * gun.speed,
+      vy: Math.sin(a) * gun.speed,
+      dmg: gun.dmg,
       life: 0.55,
     });
+    G.onMuzzle?.(mx, my, aimAngle);
     G.onCrime?.(2.2, p.x, p.y, true);
     pedestrianFlee(G.peds, p.x, p.y, 260);
     if (p.ammo === 0) p.weapon = 'fists';
     return;
   }
   // Fists.
-  p.attackCd = 0.34;
+  p.attackCd = WEAPONS.fists.cd;
   Sound.punch();
   const hx = p.x + Math.cos(aimAngle) * 30;
   const hy = p.y + Math.sin(aimAngle) * 30;
@@ -219,6 +243,7 @@ export function playerAttack(G, aimAngle) {
     if (Math.hypot(car.x - hx, car.y - hy) < car.w * 0.62) {
       car.health -= 6;
       Sound.hit();
+      G.onSpark?.(hx, hy);
       G.onCrime?.(0.8, p.x, p.y, true);
       return;
     }
@@ -246,7 +271,8 @@ export function updateBullets(G, dt) {
     if (!dead) {
       for (const car of G.cars) {
         if (Math.hypot(car.x - b.x, car.y - b.y) < car.w * 0.55) {
-          car.health -= 16;
+          car.health -= b.dmg ?? 16;
+          G.onSpark?.(b.x, b.y);
           if (car.type === 'police') G.onCrime?.(2.5, b.x, b.y, true);
           if (car.health <= 0) car.wrecked = true;
           dead = true;
@@ -275,6 +301,7 @@ export function updatePlayerOnFoot(G, dt, aimAngle) {
   if (p.dead) return;
   p.attackCd = Math.max(0, p.attackCd - dt);
   p.hurtCd = Math.max(0, p.hurtCd - dt);
+  p.hurtT += dt;
 
   let mx = 0;
   let my = 0;
@@ -291,9 +318,13 @@ export function updatePlayerOnFoot(G, dt, aimAngle) {
     p.y += (my / len) * speed * dt;
     p.walkCycle += dt * (sprint ? 13 : 9);
     if (!keyDown('mouse')) p.angle = Math.atan2(my, mx);
+    // Sprinting across the sand kicks up little puffs of it.
+    if (sprint && isSand(p.x, p.y) && Math.random() < dt * 9) {
+      G.onDust?.(p.x, p.y + 8, 1);
+    }
   }
-  // Face the mouse while the pistol is drawn.
-  if (p.weapon === 'pistol') p.angle = aimAngle;
+  // Face the mouse while a gun is drawn.
+  if (p.weapon === 'pistol' || p.weapon === 'smg') p.angle = aimAngle;
 
   const pos = { x: p.x, y: p.y };
   collideCircle(G.city, pos, p.r);
@@ -312,6 +343,24 @@ export function updatePlayerOnFoot(G, dt, aimAngle) {
     }
   }
 
+  // Food stands: a hot plate for $10, if Rafe is hurt and can pay.
+  for (const s of G.city.foodStands) {
+    s.cd = Math.max(0, s.cd - dt);
+    if (s.cd <= 0 && Math.hypot(s.x - p.x, s.y - p.y) < 34) {
+      if (p.hp < p.maxHp && p.cash >= 10) {
+        p.cash -= 10;
+        p.hp = Math.min(p.maxHp, p.hp + 40);
+        s.cd = 25;
+        Sound.heal();
+        G.onSparkle?.(p.x, p.y - 10, '#69f0ae');
+        G.toast?.(`${s.label}: hot food, +40 health (−$10)`);
+      } else if (p.hp < p.maxHp) {
+        G.toast?.(`${s.label}: $10 a plate — you are short`);
+        s.cd = 4;
+      }
+    }
+  }
+
   // Pickups and packages.
   for (const pk of G.city.pickups) {
     if (pk.taken) continue;
@@ -321,11 +370,16 @@ export function updatePlayerOnFoot(G, dt, aimAngle) {
         p.weapon = 'pistol';
         p.ammo += 24;
         G.toast?.('Pistol acquired — click to fire');
+      } else if (pk.kind === 'smg') {
+        p.weapon = 'smg';
+        p.ammo += 90;
+        G.toast?.('SMG acquired — hold click and hose');
       } else {
         p.hp = Math.min(p.maxHp, p.hp + 45);
         G.toast?.('Patched up +45');
       }
       Sound.pickup();
+      G.onSparkle?.(pk.x, pk.y);
     }
   }
   for (const pkg of G.city.packages) {
@@ -335,7 +389,8 @@ export function updatePlayerOnFoot(G, dt, aimAngle) {
       p.cash += 50;
       G.packagesFound += 1;
       Sound.cash();
-      G.toast?.(`Cash package found (${G.packagesFound}/10) +$50`);
+      G.onSparkle?.(pkg.x, pkg.y);
+      G.toast?.(`Cash package found (${G.packagesFound}/${G.city.packages.length}) +$50`);
       G.saveGame?.();
     }
   }
@@ -346,6 +401,7 @@ export function hurtPlayer(G, amount) {
   if (p.dead || p.hurtCd > 0) return;
   p.hp -= amount;
   p.hurtCd = 0.7;
+  p.hurtT = 0;
   Sound.hit();
   if (p.hp <= 0) {
     p.hp = 0;

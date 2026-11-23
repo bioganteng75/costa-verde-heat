@@ -2,6 +2,12 @@
 // becomes stars, stars bring patrol cars that hunt Rafe across the grid.
 // Staying out of sight lets the heat bleed away; getting cornered while
 // slow fills the bust meter, and an empty meter is a free man.
+//
+// v2 escalation: at four stars and up the Policía stop chasing fair —
+// they seal the intersection ahead with a roadblock of parked patrol
+// cars and wait for you to make the mistake. Pursuit speed scales with
+// the stars, so a one-star tail is a nuisance and a five-star tail is a
+// nightmare, but never an impossible one.
 
 import { CAR_TYPES, makeCar, nodeNeighbours } from './vehicles.js';
 import { collideCircle } from './world.js';
@@ -62,6 +68,65 @@ function spawnPolice(G) {
   G.police.push(car);
 }
 
+/** Patrol speed factor by stars: polite at one, relentless at five. */
+export function pursuitFactor(stars) {
+  return 0.9 + stars * 0.045;
+}
+
+/**
+ * Seal an intersection ahead of the player with parked patrol cars.
+ * The block is a pair (a triple at five stars) set across the road the
+ * player is travelling on, far enough ahead to be a decision, not a
+ * jump-scare. Blocks dissolve once the heat drops or the player is far.
+ */
+export function spawnRoadblock(G) {
+  const p = G.player;
+  const focus = p.car ?? p;
+  const heading = p.car ? p.car.angle : p.angle;
+  const aheadX = focus.x + Math.cos(heading) * 620;
+  const aheadY = focus.y + Math.sin(heading) * 620;
+  let node = null;
+  let bd = Infinity;
+  for (const n of G.nodes) {
+    const d = Math.hypot(n.x - aheadX, n.y - aheadY);
+    if (d < bd) { bd = d; node = n; }
+  }
+  if (!node || bd > 420) return false;
+  // Park across whichever road runs through the node toward the player.
+  const acrossAngle = Math.abs(Math.cos(heading)) > Math.abs(Math.sin(heading))
+    ? Math.PI / 2   // player runs east-west: cars face north, sealing lanes
+    : 0;           // player runs north-south: cars face east
+  const cars = [];
+  const count = G.wanted.stars >= 5 ? 3 : 2;
+  for (let i = 0; i < count; i++) {
+    const off = (i - (count - 1) / 2) * 44;
+    const bx = acrossAngle === 0 ? node.x : node.x + off;
+    const by = acrossAngle === 0 ? node.y + off : node.y;
+    const car = makeCar(bx, by, acrossAngle + (i % 2 ? 0.06 : -0.06), 'police', 'block');
+    car.speed = 0;
+    G.cars.push(car);
+    cars.push(car);
+  }
+  G.roadblocks.push({ cars, x: node.x, y: node.y });
+  G.toast?.('Roadblock ahead!');
+  Sound.horn();
+  return true;
+}
+
+function clearRoadblocks(G, dissolveFar) {
+  const p = G.player;
+  for (let i = G.roadblocks.length - 1; i >= 0; i--) {
+    const rb = G.roadblocks[i];
+    const d = Math.hypot(rb.x - p.x, rb.y - p.y);
+    if (dissolveFar && d < 950) continue;
+    for (const car of rb.cars) {
+      const idx = G.cars.indexOf(car);
+      if (idx >= 0) G.cars.splice(idx, 1);
+    }
+    G.roadblocks.splice(i, 1);
+  }
+}
+
 export function updateWanted(G, dt) {
   const w = G.wanted;
   const px = G.player.car ? G.player.car.x : G.player.x;
@@ -78,7 +143,7 @@ export function updateWanted(G, dt) {
 
   // Heat decays only while unseen and no fresh crime has landed.
   if (!seen && G.time - w.lastCrimeAt > 4) {
-    w.heat = Math.max(0, w.heat - dt * 0.14);
+    w.heat = Math.max(0, w.heat - dt * 0.15);
     w.stars = Math.min(5, Math.floor(w.heat));
   }
 
@@ -97,6 +162,19 @@ export function updateWanted(G, dt) {
     extra.driver = 'traffic';
     G.police.splice(G.police.indexOf(extra), 1);
   }
+
+  // Roadblocks: raised at four stars, refreshed on a long cooldown,
+  // dissolved when the heat dies or the player leaves them behind.
+  G.roadblockCd = Math.max(0, (G.roadblockCd ?? 0) - dt);
+  if (w.stars >= 4) {
+    if (G.roadblocks.length === 0 && G.roadblockCd <= 0) {
+      if (spawnRoadblock(G)) G.roadblockCd = 26;
+      else G.roadblockCd = 5;
+    }
+  } else if (G.roadblocks.length) {
+    clearRoadblocks(G, false);
+  }
+  if (G.roadblocks.length) clearRoadblocks(G, true);
 
   Sound.setSiren(w.stars >= 1 && alive.length > 0 && !G.player.dead);
 }
@@ -122,8 +200,9 @@ export function updatePoliceCar(G, car, dt) {
   const spec = CAR_TYPES.police;
   car.angle += Math.max(-3.4 * dt, Math.min(3.4 * dt, diff));
 
-  let desired = spec.maxSpeed * (dist > 260 ? 1 : 0.72);
+  let desired = spec.maxSpeed * pursuitFactor(G.wanted.stars) * (dist > 260 ? 1 : 0.74);
   if (Math.abs(diff) > 2.2) desired = -120; // badly turned around: back up
+  car.braking = desired < car.speed - 30;
   car.speed += Math.max(-380 * dt, Math.min(spec.accel * dt, desired - car.speed));
   car.x += Math.cos(car.angle) * car.speed * dt;
   car.y += Math.sin(car.angle) * car.speed * dt;
@@ -132,6 +211,7 @@ export function updatePoliceCar(G, car, dt) {
     car.x = pos.x;
     car.y = pos.y;
     car.speed *= -0.2;
+    G.onSpark?.(car.x, car.y);
   }
 
   // Ramming a fleeing car hurts it a little and the player a little.
@@ -141,6 +221,7 @@ export function updatePoliceCar(G, car, dt) {
       G.player.car.health -= 7;
       G.ramCd = 0.8;
       Sound.crash();
+      G.onSpark?.(G.player.car.x, G.player.car.y);
     }
   }
 }
@@ -158,10 +239,11 @@ export function updateBust(G, dt) {
     if (cop.wrecked) continue;
     if (Math.hypot(cop.x - px, cop.y - py) < 95) near++;
   }
+  // One cop is a warning; two are a problem. Moving even slowly bleeds it.
   if (near > 0 && speed < 42) {
-    w.bustMeter += dt * (near >= 2 ? 0.55 : 0.34);
+    w.bustMeter += dt * (near >= 2 ? 0.5 : 0.3);
   } else {
-    w.bustMeter = Math.max(0, w.bustMeter - dt * 0.5);
+    w.bustMeter = Math.max(0, w.bustMeter - dt * 0.55);
   }
   if (w.bustMeter >= 1) {
     w.bustMeter = 0;
@@ -175,5 +257,6 @@ export function clearWanted(G) {
   G.wanted.bustMeter = 0;
   for (const cop of G.police) cop.driver = 'traffic';
   G.police.length = 0;
+  if (G.roadblocks?.length) clearRoadblocks(G, false);
   Sound.setSiren(false);
 }

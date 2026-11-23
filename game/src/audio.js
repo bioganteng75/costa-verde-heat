@@ -2,6 +2,12 @@
 // No audio files: every effect is an oscillator or filtered noise burst
 // shaped at run time. The engine hum and the police siren are looping
 // nodes whose pitch follows the game state; M toggles a master mute.
+//
+// v2 voices: the SMG chatters faster and thinner than the pistol, the
+// Pay 'n Spray answers with a little cash-register arpeggio, food
+// stands heal with a soft two-note chime, races count down with beeps,
+// and the engine's base note follows the vehicle — a bike whines, a
+// truck growls.
 
 class AudioSys {
   constructor() {
@@ -69,8 +75,20 @@ class AudioSys {
   hit() { this.noise(0.12, 0.3, 500); this.tone(120, 0.12, 'sawtooth', 0.18, 60); }
   crash() { this.noise(0.3, 0.4, 350); this.tone(70, 0.3, 'sawtooth', 0.2, 40); }
   shot() { this.noise(0.09, 0.35, 1800); this.tone(220, 0.08, 'square', 0.15, 90); }
+  smgShot() { this.noise(0.05, 0.26, 2400); this.tone(300, 0.045, 'square', 0.11, 130); }
   punch() { this.noise(0.07, 0.22, 700); }
   horn() { this.tone(370, 0.25, 'square', 0.12); this.tone(466, 0.25, 'square', 0.1, null, 0.02); }
+  heal() { this.tone(587, 0.12, 'sine', 0.2); this.tone(880, 0.2, 'sine', 0.2, null, 0.1); }
+  spray() {
+    // The booth's little song: rollers, rinse, and a register ding.
+    this.noise(0.5, 0.12, 500);
+    this.tone(784, 0.1, 'triangle', 0.18, null, 0.45);
+    this.tone(1047, 0.16, 'triangle', 0.18, null, 0.56);
+  }
+  beep(final = false) {
+    if (final) { this.tone(880, 0.3, 'square', 0.16); this.tone(1320, 0.34, 'square', 0.12, null, 0.02); }
+    else this.tone(440, 0.12, 'square', 0.14);
+  }
   missionDone() {
     this.tone(523, 0.12, 'triangle', 0.22);
     this.tone(659, 0.12, 'triangle', 0.22, null, 0.11);
@@ -82,7 +100,8 @@ class AudioSys {
     this.tone(262, 0.34, 'square', 0.18, null, 0.32);
   }
 
-  setEngine(on, speedRatio = 0) {
+  /** Engine loop; `kind` shifts the base note per vehicle type. */
+  setEngine(on, speedRatio = 0, kind = 'sedan') {
     if (!this.ctx) return;
     if (on && !this.engine) {
       const osc = this.ctx.createOscillator();
@@ -101,7 +120,9 @@ class AudioSys {
       this.engine = null;
     }
     if (this.engine) {
-      this.engine.osc.frequency.value = 50 + Math.abs(speedRatio) * 130;
+      const base = kind === 'moto' ? 95 : kind === 'truck' ? 36 : 52;
+      const climb = kind === 'moto' ? 210 : kind === 'truck' ? 80 : 130;
+      this.engine.osc.frequency.value = base + Math.abs(speedRatio) * climb;
     }
   }
 

@@ -1,15 +1,24 @@
 // hud.js — everything drawn over the world: cash and health, the wanted
 // stars, the objective banner, the speedometer, the minimap with its
 // blips, and the full-screen menus (start, pause, busted, wasted).
+//
+// v2 polish: an arrow at the screen edge chases off-screen objectives,
+// the wanted stars pulse with the heat, a red vignette blooms when Rafe
+// is hurt, and the minimap knows the city's services — the Pay 'n Spray,
+// the food stands and the race rings.
 
 import { WORLD_W, WORLD_H, AVENUES, STREETS, WATER_Y } from './world.js';
-import { currentObjective } from './missions.js';
+import { currentObjective, raceInfo, STORY, RACES } from './missions.js';
+import { carDisplayName } from './vehicles.js';
 
 function panel(ctx, x, y, w, h, alpha = 0.55) {
   ctx.fillStyle = `rgba(12,18,28,${alpha})`;
   ctx.beginPath();
   ctx.roundRect(x, y, w, h, 10);
   ctx.fill();
+  ctx.strokeStyle = 'rgba(255,213,79,0.25)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
 }
 
 export function drawMinimap(ctx, G, x, y, w, h) {
@@ -28,7 +37,23 @@ export function drawMinimap(ctx, G, x, y, w, h) {
   for (const syV of STREETS) {
     ctx.beginPath(); ctx.moveTo(sx(0), sy(syV)); ctx.lineTo(sx(WORLD_W), sy(syV)); ctx.stroke();
   }
-  // Objective: gold diamond. Taxi: blue dot.
+  // Services: the spray shop in magenta, food stands in green.
+  const ps = G.city.landmarks.paynspray;
+  ctx.fillStyle = '#ec407a';
+  ctx.fillRect(sx(ps.x) - 3, sy(ps.y) - 3, 6, 6);
+  ctx.fillStyle = '#69f0ae';
+  for (const s of G.city.foodStands) {
+    ctx.beginPath();
+    ctx.arc(sx(s.x), sy(s.y), 2.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Race ring in cyan, objective in gold, taxi in blue.
+  const ri = raceInfo(G);
+  ctx.strokeStyle = '#00e5ff';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.arc(sx(ri.x), sy(ri.y), 4.4, 0, Math.PI * 2);
+  ctx.stroke();
   const obj = currentObjective(G);
   if (obj.x !== null && obj.x !== undefined) {
     ctx.fillStyle = '#ffd54f';
@@ -55,6 +80,11 @@ export function drawMinimap(ctx, G, x, y, w, h) {
     ctx.arc(sx(cop.x), sy(cop.y), 3, 0, Math.PI * 2);
     ctx.fill();
   }
+  // Roadblocks sit on the map as red squares.
+  ctx.fillStyle = '#ff1744';
+  for (const rb of G.roadblocks ?? []) {
+    ctx.fillRect(sx(rb.x) - 3, sy(rb.y) - 3, 6, 6);
+  }
   // Player arrow.
   const p = G.player;
   const px = sx(p.car ? p.car.x : p.x);
@@ -73,8 +103,62 @@ export function drawMinimap(ctx, G, x, y, w, h) {
   ctx.restore();
 }
 
+/** A gold arrow pinned to the screen edge while the objective is off-screen. */
+export function drawObjectiveArrow(ctx, G, vw, vh) {
+  const obj = currentObjective(G);
+  if (obj.x === null || obj.x === undefined) return;
+  const p = G.player;
+  const px = p.car ? p.car.x : p.x;
+  const py = p.car ? p.car.y : p.y;
+  const sx = obj.x - G.cam.x;
+  const sy = obj.y - G.cam.y;
+  const margin = 46;
+  if (sx > margin && sx < vw - margin && sy > margin && sy < vh - margin) return;
+  const cx = vw / 2;
+  const cy = vh / 2;
+  const ang = Math.atan2(sy - cy, sx - cx);
+  const ex = Math.max(margin, Math.min(vw - margin, sx));
+  const ey = Math.max(margin, Math.min(vh - margin, sy));
+  const dist = Math.round(Math.hypot(obj.x - px, obj.y - py) / 10);
+  ctx.save();
+  ctx.translate(ex, ey);
+  ctx.rotate(ang);
+  ctx.fillStyle = '#ffd54f';
+  ctx.strokeStyle = 'rgba(20,16,0,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(17, 0);
+  ctx.lineTo(-9, -11);
+  ctx.lineTo(-4, 0);
+  ctx.lineTo(-9, 11);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#ffd54f';
+  ctx.font = 'bold 12px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  // Pinned to the top edge, the label goes above the arrow instead of
+  // colliding with the objective banner that lives up there.
+  ctx.fillText(`${dist}m`, ex, ey <= margin + 2 ? ey - 24 : ey + 30);
+}
+
+function drawDamageVignette(ctx, G, vw, vh) {
+  const p = G.player;
+  const fresh = Math.max(0, 1 - p.hurtT / 1.1);         // bloom right after a hit
+  const low = p.hp < 35 ? 0.35 + 0.12 * Math.sin(G.time * 5) : 0; // low-health pulse
+  const a = Math.min(0.55, fresh * 0.5 + low);
+  if (a <= 0.01 || p.dead) return;
+  const grad = ctx.createRadialGradient(vw / 2, vh / 2, Math.min(vw, vh) * 0.36, vw / 2, vh / 2, Math.max(vw, vh) * 0.72);
+  grad.addColorStop(0, 'rgba(200,20,20,0)');
+  grad.addColorStop(1, `rgba(200,20,20,${a})`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, vw, vh);
+}
+
 export function drawHUD(ctx, G, vw, vh) {
   const p = G.player;
+  drawDamageVignette(ctx, G, vw, vh);
   // Cash + health, top-left.
   panel(ctx, 14, 14, 218, 64);
   ctx.fillStyle = '#69f0ae';
@@ -83,7 +167,7 @@ export function drawHUD(ctx, G, vw, vh) {
   ctx.fillText(`$${p.cash}`, 26, 44);
   ctx.fillStyle = 'rgba(255,255,255,0.75)';
   ctx.font = '12px system-ui, sans-serif';
-  ctx.fillText(`packages ${G.packagesFound}/10`, 26, 66);
+  ctx.fillText(`packages ${G.packagesFound}/${G.city.packages.length} · races ${G.missions.racesWon}/${RACES.length}`, 26, 66);
   // Health bar.
   ctx.fillStyle = 'rgba(255,255,255,0.18)';
   ctx.fillRect(118, 30, 100, 12);
@@ -93,14 +177,20 @@ export function drawHUD(ctx, G, vw, vh) {
   ctx.font = '11px system-ui, sans-serif';
   ctx.fillText('HEALTH', 118, 58);
 
-  // Wanted stars above the minimap.
+  // Wanted stars above the minimap, pulsing with the heat.
   const stars = G.wanted.stars;
   if (stars > 0) {
-    ctx.font = '26px system-ui, sans-serif';
-    ctx.textAlign = 'right';
+    ctx.textAlign = 'left';
     for (let i = 0; i < 5; i++) {
-      ctx.fillStyle = i < stars ? '#ffd54f' : 'rgba(255,255,255,0.25)';
-      ctx.fillText('★', vw - 18 - (4 - i) * 26, 40);
+      const lit = i < stars;
+      const scale = lit ? 1 + 0.13 * Math.sin(G.time * 6 - i * 0.7) : 1;
+      ctx.save();
+      ctx.translate(vw - 146 + i * 27, 34);
+      ctx.scale(scale, scale);
+      ctx.font = '26px system-ui, sans-serif';
+      ctx.fillStyle = lit ? '#ffd54f' : 'rgba(255,255,255,0.25)';
+      ctx.fillText('★', -12, 9);
+      ctx.restore();
     }
     if (G.wanted.bustMeter > 0.02) {
       ctx.fillStyle = 'rgba(255,255,255,0.2)';
@@ -109,13 +199,15 @@ export function drawHUD(ctx, G, vw, vh) {
       ctx.fillRect(vw - 224, 50, 130 * Math.min(1, G.wanted.bustMeter), 9);
       ctx.fillStyle = '#fff';
       ctx.font = 'bold 10px system-ui, sans-serif';
+      ctx.textAlign = 'right';
       ctx.fillText('BUSTED?', vw - 94, 59);
     }
   }
 
   drawMinimap(ctx, G, vw - 224, 66, 210, 158);
+  drawObjectiveArrow(ctx, G, vw, vh);
 
-  // Objective banner, top-centre.
+  // Objective banner, top-centre, with the job's progress under it.
   const obj = currentObjective(G);
   const label = obj.timer !== null && obj.timer !== undefined
     ? `${obj.text}  —  ${Math.max(0, Math.ceil(obj.timer))}s`
@@ -126,6 +218,16 @@ export function drawHUD(ctx, G, vw, vh) {
   ctx.fillStyle = '#ffd54f';
   ctx.textAlign = 'center';
   ctx.fillText(label, vw / 2, 39);
+  const M = G.missions;
+  let progress = null;
+  if (M.race) progress = `Race series — ${M.racesWon}/${RACES.length} won`;
+  else if (M.active) progress = `Job ${M.storyIndex + 1}/${STORY.length} · "${M.active.def.title}" · step ${M.active.stepIndex + 1}/${M.active.def.steps.length}`;
+  else if (M.storyIndex < STORY.length) progress = `Story: ${M.storyIndex}/${STORY.length} jobs done`;
+  if (progress) {
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.fillText(progress, vw / 2, 68);
+  }
 
   // Phone toast from Marisol, bottom-left.
   if (G.missions.phone) {
@@ -155,24 +257,28 @@ export function drawHUD(ctx, G, vw, vh) {
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
   ctx.font = 'bold 14px system-ui, sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillText(p.weapon === 'pistol' ? `🔫 Pistol · ${p.ammo}` : '👊 Fists', 16, vh - 14);
+  const wlabel = p.weapon === 'pistol' ? `🔫 Pistol · ${p.ammo}` : p.weapon === 'smg' ? `🔫 SMG · ${p.ammo}` : '👊 Fists';
+  ctx.fillText(wlabel, 16, vh - 14);
 
-  // Speedometer while driving.
+  // Speedometer while driving, with the vehicle's name.
   if (p.car) {
     const kmh = Math.round(Math.abs(p.car.speed) * 0.36);
-    panel(ctx, vw - 150, vh - 86, 136, 70);
+    panel(ctx, vw - 168, vh - 92, 154, 76);
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 32px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(String(kmh), vw - 82, vh - 44);
+    ctx.fillText(String(kmh), vw - 91, vh - 50);
     ctx.font = '11px system-ui, sans-serif';
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.fillText('km/h', vw - 82, vh - 26);
+    ctx.fillText('km/h', vw - 91, vh - 32);
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.fillStyle = '#90caf9';
+    ctx.fillText(carDisplayName(p.car).toUpperCase(), vw - 91, vh - 76);
     // Car health pip.
     ctx.fillStyle = 'rgba(255,255,255,0.2)';
-    ctx.fillRect(vw - 138, vh - 100, 112, 6);
+    ctx.fillRect(vw - 156, vh - 106, 130, 6);
     ctx.fillStyle = p.car.health > 35 ? '#69f0ae' : '#ef5350';
-    ctx.fillRect(vw - 138, vh - 100, Math.max(0, p.car.health) * 1.12, 6);
+    ctx.fillRect(vw - 156, vh - 106, Math.max(0, p.car.health) * (130 / (p.car.maxHealth || 100)), 6);
   }
 
   if (G.muted) {
@@ -257,8 +363,8 @@ export function drawMenu(ctx, G, vw, vh) {
   ctx.fillStyle = 'rgba(255,255,255,0.92)';
   const story = [
     'Rafe Solano came home to Costa Verde with empty pockets and a loud shirt.',
-    'Fixer Marisol Vega has work: packages, races and one very big getaway.',
-    'Drive anything, dodge the Policía, and make the city pay you back.',
+    'Fixer Marisol Vega has seven jobs: packages, races and one sunset getaway.',
+    'Drive anything — cars, trucks, a motorcycle — dodge the Policía, get paid.',
   ];
   story.forEach((line, i) => ctx.fillText(line, vw / 2, vh * 0.52 + i * 24));
   const bw = 240;
@@ -268,9 +374,11 @@ export function drawMenu(ctx, G, vw, vh) {
   ctx.font = '14px system-ui, sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
   const controls = 'WASD / Arrows — move & drive · Shift — sprint · F — enter / steal car · Space — handbrake';
-  const controls2 = 'Mouse — aim · Click / Space — attack · P / Esc — pause · M — mute';
-  ctx.fillText(controls, vw / 2, vh * 0.9);
-  ctx.fillText(controls2, vw / 2, vh * 0.9 + 21);
+  const controls2 = 'Mouse — aim · Click — attack / hold for the SMG · P / Esc — pause · M — mute';
+  const controls3 = "Cyan rings start street races · the Pay 'n Spray clears your heat · food stands heal";
+  ctx.fillText(controls, vw / 2, vh * 0.88);
+  ctx.fillText(controls2, vw / 2, vh * 0.88 + 21);
+  ctx.fillText(controls3, vw / 2, vh * 0.88 + 42);
 }
 
 export function drawPause(ctx, G, vw, vh) {
@@ -283,11 +391,12 @@ export function drawPause(ctx, G, vw, vh) {
   ctx.fillText('PAUSED', vw / 2, vh * 0.36);
   ctx.font = '16px system-ui, sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  ctx.fillText(`Cash $${G.player.cash} · Story jobs done: ${G.missions.storyIndex}/5 · Packages ${G.packagesFound}/10`, vw / 2, vh * 0.36 + 36);
+  ctx.fillText(`Cash $${G.player.cash} · Story jobs done: ${G.missions.storyIndex}/${STORY.length} · Packages ${G.packagesFound}/${G.city.packages.length}`, vw / 2, vh * 0.36 + 36);
+  ctx.fillText(`Races won: ${G.missions.racesWon}/${RACES.length} · Weapon: ${G.player.weapon}${G.player.weapon !== 'fists' ? ` (${G.player.ammo})` : ''}`, vw / 2, vh * 0.36 + 60);
   const bw = 230;
   const bx = vw / 2 - bw / 2;
-  drawButton(ctx, G, 'resume', bx, vh * 0.46, bw, 50, 'RESUME', true);
-  drawButton(ctx, G, 'savequit', bx, vh * 0.46 + 62, bw, 50, 'SAVE & TITLE', false);
+  drawButton(ctx, G, 'resume', bx, vh * 0.48, bw, 50, 'RESUME', true);
+  drawButton(ctx, G, 'savequit', bx, vh * 0.48 + 62, bw, 50, 'SAVE & TITLE', false);
 }
 
 export function drawEndScreen(ctx, G, vw, vh, kind) {

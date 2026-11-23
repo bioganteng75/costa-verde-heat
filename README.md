@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/gta6-01/bioganteng75/costa-verde-heat/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 [![reward](https://make.fun/badge/gta6-01/bioganteng75/costa-verde-heat/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 
-Costa Verde Heat is a top-down 2D open-world crime game that runs in the browser: explore a sun-soaked coastal city on foot and by car, run a five-mission story chain for fixer Marisol Vega, work taxi fares, hunt hidden cash packages, and outrun a 0–5 star police wanted system. It is plain HTML, CSS and JavaScript with a small WebAudio synth for sound — no build step, no libraries, no network requests.
+Costa Verde Heat v2 is a top-down open-world crime game that runs in the browser. Explore a pseudo-3D coastal city — extruded pastel towers downtown, low blocks by the sand — on foot, by car, by truck or on a motorcycle, as the day rolls from noon into a lamplit dusk. Run a seven-mission story chain for fixer Marisol Vega, take the three-race street series, work taxi fares and hunt 18 hidden cash packages, all under a 0–5 star wanted system with pursuing patrols and roadblocks at high heat. Skid marks, dust, sparks and screen shake sell the speed; a Pay 'n Spray clears your record, food stands heal you, and a pistol and an SMG cover the loud options. It is plain HTML, CSS and JavaScript with a small WebAudio synth for sound — no build step, no libraries, no network requests.
 
 ## Run it
 
