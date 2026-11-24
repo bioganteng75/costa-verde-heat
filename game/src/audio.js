@@ -1,115 +1,98 @@
-// audio.js — WebAudio synth sound effects. One muted flag lives here;
-// the HUD label is synced through CVH.hud.syncSoundLabel() on every toggle.
-(function () {
-  'use strict';
-  var U = CVH.util;
+// Costa Verde Heat — WebAudio synth sounds. One muted flag lives here
+// (CVH.audio.muted); every toggle path (M key, HUD button, pause button)
+// goes through CVH.audio.setMuted so the HUD label can never desync.
+CVH.audio = (function () {
+  let ctx = null;
+  let master = null;
+  let sirenOsc = null;
+  let sirenGain = null;
 
-  var ctx = null;
-  var master = null;
-  var muted = false;
-  var sirenOsc = null;
-  var sirenGain = null;
-  var sirenTimer = 0;
+  const api = {
+    muted: CVH.store.get('cvhMuted', '0') === '1',
 
-  function ensureCtx() {
-    if (ctx) return true;
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return false;
-      ctx = new AC();
-      master = ctx.createGain();
-      master.gain.value = muted ? 0 : 0.5;
-      master.connect(ctx.destination);
-    } catch (e) {
-      return false;
-    }
-    return true;
-  }
-
-  function tone(freq, dur, type, vol, slideTo) {
-    if (muted || !ensureCtx()) return;
-    try {
-      var o = ctx.createOscillator();
-      var g = ctx.createGain();
-      o.type = type || 'square';
-      o.frequency.setValueAtTime(freq, ctx.currentTime);
-      if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(30, slideTo), ctx.currentTime + dur);
-      g.gain.setValueAtTime(vol || 0.2, ctx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
-      o.connect(g); g.connect(master);
-      o.start(); o.stop(ctx.currentTime + dur);
-    } catch (e) { /* audio is best-effort */ }
-  }
-
-  function noise(dur, vol, freq) {
-    if (muted || !ensureCtx()) return;
-    try {
-      var len = Math.floor(ctx.sampleRate * dur);
-      var buf = ctx.createBuffer(1, len, ctx.sampleRate);
-      var data = buf.getChannelData(0);
-      for (var i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
-      var src = ctx.createBufferSource();
-      src.buffer = buf;
-      var f = ctx.createBiquadFilter();
-      f.type = 'lowpass'; f.frequency.value = freq || 1200;
-      var g = ctx.createGain();
-      g.gain.value = vol || 0.3;
-      src.connect(f); f.connect(g); g.connect(master);
-      src.start();
-    } catch (e) { /* best-effort */ }
-  }
-
-  function setMuted(m) {
-    muted = !!m;
-    if (master) master.gain.value = muted ? 0 : 0.5;
-    if (muted) stopSiren();
-    if (CVH.hud && CVH.hud.syncSoundLabel) CVH.hud.syncSoundLabel();
-  }
-
-  function startSiren() {
-    if (muted || !ensureCtx() || sirenOsc) return;
-    try {
-      sirenOsc = ctx.createOscillator();
-      sirenGain = ctx.createGain();
-      sirenOsc.type = 'triangle';
-      sirenOsc.frequency.value = 700;
-      sirenGain.gain.value = 0.05;
-      sirenOsc.connect(sirenGain); sirenGain.connect(master);
-      sirenOsc.start();
-    } catch (e) { sirenOsc = null; }
-  }
-  function stopSiren() {
-    if (sirenOsc) {
-      try { sirenOsc.stop(); } catch (e) {}
-      sirenOsc = null; sirenGain = null;
-    }
-  }
-  function updateSiren(dt, active) {
-    if (!active) { stopSiren(); return; }
-    startSiren();
-    if (sirenOsc) {
-      sirenTimer += dt;
-      sirenOsc.frequency.value = 700 + Math.sin(sirenTimer * 6) * 250;
-    }
-  }
-
-  CVH.audio = {
-    get muted() { return muted; },
-    setMuted: setMuted,
-    toggleMute: function () { setMuted(!muted); return muted; },
-    click: function () { tone(660, 0.06, 'square', 0.12); },
-    pickup: function () { tone(880, 0.09, 'square', 0.18); setTimeout(function () { tone(1320, 0.12, 'square', 0.18); }, 60); },
-    cash: function () { tone(990, 0.07, 'triangle', 0.22); setTimeout(function () { tone(1480, 0.1, 'triangle', 0.2); }, 50); },
-    punch: function () { noise(0.08, 0.25, 500); },
-    shot: function (auto) { noise(auto ? 0.09 : 0.14, 0.4, 2400); tone(160, 0.08, 'sawtooth', 0.15, 60); },
-    hurt: function () { tone(220, 0.15, 'sawtooth', 0.2, 110); },
-    success: function () {
-      var notes = [523, 659, 784, 1046];
-      notes.forEach(function (n, i) { setTimeout(function () { tone(n, 0.16, 'triangle', 0.22); }, i * 90); });
+    ensure: function () {
+      if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        ctx = new AC();
+        master = ctx.createGain();
+        master.gain.value = api.muted ? 0 : 0.5;
+        master.connect(ctx.destination);
+      } catch (e) { ctx = null; }
     },
-    fail: function () { tone(300, 0.25, 'sawtooth', 0.2, 140); },
-    engine: function () { tone(90, 0.2, 'sawtooth', 0.08, 140); },
-    updateSiren: updateSiren,
-    clamp01: function (v) { return U.clamp(v, 0, 1); }
+
+    setMuted: function (m) {
+      api.muted = !!m;
+      CVH.store.set('cvhMuted', api.muted ? '1' : '0');
+      if (master && ctx) master.gain.setTargetAtTime(api.muted ? 0 : 0.5, ctx.currentTime, 0.02);
+      if (CVH.hud && CVH.hud.refreshSoundLabel) CVH.hud.refreshSoundLabel();
+    },
+    toggleMuted: function () { api.setMuted(!api.muted); },
+
+    tone: function (freq, dur, type, vol, slideTo) {
+      if (!ctx || api.muted) return;
+      try {
+        const t = ctx.currentTime;
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = type || 'square';
+        o.frequency.setValueAtTime(freq, t);
+        if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(30, slideTo), t + dur);
+        g.gain.setValueAtTime(vol || 0.2, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+        o.connect(g); g.connect(master);
+        o.start(t); o.stop(t + dur + 0.02);
+      } catch (e) { /* sound is best-effort */ }
+    },
+
+    noise: function (dur, vol, low) {
+      if (!ctx || api.muted) return;
+      try {
+        const t = ctx.currentTime;
+        const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+        const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+        const src = ctx.createBufferSource(); src.buffer = buf;
+        const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = low || 1200;
+        const g = ctx.createGain(); g.gain.value = vol || 0.3;
+        src.connect(f); f.connect(g); g.connect(master);
+        src.start(t);
+      } catch (e) { /* best-effort */ }
+    },
+
+    blip: function () { api.tone(660, 0.08, 'square', 0.15); },
+    pickup: function () { api.tone(523, 0.09, 'square', 0.18); setTimeout(function () { api.tone(784, 0.14, 'square', 0.18); }, 70); },
+    cash: function () { api.tone(880, 0.07, 'triangle', 0.22); setTimeout(function () { api.tone(1174, 0.12, 'triangle', 0.22); }, 60); },
+    shot: function () { api.noise(0.12, 0.35, 2600); },
+    crash: function () { api.noise(0.25, 0.4, 500); api.tone(90, 0.25, 'sawtooth', 0.2, 40); },
+    hurt: function () { api.tone(160, 0.15, 'sawtooth', 0.2, 70); },
+    jobDone: function () { [523, 659, 784, 1046].forEach(function (f, i) { setTimeout(function () { api.tone(f, 0.16, 'square', 0.18); }, i * 90); }); },
+    bustedJingle: function () { [392, 330, 262].forEach(function (f, i) { setTimeout(function () { api.tone(f, 0.22, 'triangle', 0.22); }, i * 140); }); },
+
+    setSiren: function (on) {
+      if (!ctx) return;
+      try {
+        if (on && !sirenOsc && !api.muted) {
+          sirenOsc = ctx.createOscillator();
+          sirenGain = ctx.createGain();
+          sirenOsc.type = 'triangle';
+          sirenGain.gain.value = 0.05;
+          const lfo = ctx.createOscillator();
+          const lfoGain = ctx.createGain();
+          lfo.frequency.value = 0.7; lfoGain.gain.value = 180;
+          lfo.connect(lfoGain); lfoGain.connect(sirenOsc.frequency);
+          sirenOsc.frequency.value = 820;
+          sirenOsc.connect(sirenGain); sirenGain.connect(master);
+          sirenOsc.start(); lfo.start();
+          sirenOsc._lfo = lfo;
+        } else if (!on && sirenOsc) {
+          sirenOsc.stop(); if (sirenOsc._lfo) sirenOsc._lfo.stop();
+          sirenOsc = null; sirenGain = null;
+        }
+      } catch (e) { /* best-effort */ }
+    }
   };
+  return api;
 })();

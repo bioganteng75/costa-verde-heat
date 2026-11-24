@@ -1,263 +1,260 @@
-// main.js — boot, state machine (menu / playing / paused / ending),
-// cameras (orbit on foot, chase while driving, cinematic orbit in the menu),
-// busted/wasted flow, save & continue, and the CVH.debug test hooks.
+// Costa Verde Heat — boot, state machine, cameras, save/load, and the
+// busted / wasted / ending flows. States: menu (living title screen over the
+// simulated city), playing, paused, ending.
 (function () {
-  'use strict';
-  var U = CVH.util;
-  var W = CVH.world;
+  const SAVE_KEY = 'costaVerdeHeat3DSaveV1';
 
-  var SAVE_KEY = 'costaVerdeHeat3DSaveV1';
-  var renderer = null, camera = null;
-  var state = 'menu';
-  var camYaw = Math.PI, camPitch = 0.32;
-  var menuAngle = 0.6;
-  var started = false;
+  let renderer = null, scene = null, camera = null;
+  let state = 'menu';
+  let dayT = 0.86;
+  let menuAngle = 0.6;
+  let lastTs = 0;
+  let saveTick = 0;
 
-  function $(id) { return document.getElementById(id); }
+  const game = {
+    get state() { return state; },
+    get dayT() { return dayT; },
+    set dayT(v) { dayT = v; },
+    setState: setState,
+    newGame: newGame,
+    continueGame: continueGame,
+    hasSave: hasSave,
+    save: save
+  };
+  CVH.game = game;
 
-  function show(id, disp) { var e = $(id); if (e) e.style.display = disp; }
+  function el(id) { return document.getElementById(id); }
 
-  function setState(s) {
-    state = s;
-    show('menu', s === 'menu' ? 'flex' : 'none');
-    show('pause', s === 'paused' ? 'flex' : 'none');
-    show('ending', s === 'ending' ? 'flex' : 'none');
-    show('hud', (s === 'playing' || s === 'paused') ? 'block' : 'none');
+  function hasSave() { return !!CVH.store.get(SAVE_KEY, null); }
+
+  function save() {
+    const p = CVH.player;
+    CVH.store.setJSON(SAVE_KEY, {
+      cash: Math.floor(p.cash),
+      jobIndex: CVH.missions.jobIndex,
+      packages: CVH.missions.packagesFound,
+      weapon: p.weapon,
+      ammo: p.ammo,
+      pos: { x: Math.round(p.pos.x), z: Math.round(p.pos.z) }
+    });
   }
 
+  function newGame() {
+    CVH.missions.resetStory();
+    CVH.police.reset();
+    const p = CVH.player;
+    p.cash = 150;
+    p.weapon = null;
+    p.ammo = { pistol: 0, smg: 0 };
+    p.reset(CVH.world.points.spawn);
+    dayT = 0.3;
+    save();
+  }
+
+  function continueGame() {
+    const data = CVH.store.getJSON(SAVE_KEY, null);
+    const p = CVH.player;
+    CVH.missions.resetStory();
+    CVH.police.reset();
+    p.reset(CVH.world.points.spawn);
+    if (data) {
+      p.cash = data.cash || 0;
+      p.weapon = data.weapon || null;
+      p.ammo = data.ammo || { pistol: 0, smg: 0 };
+      CVH.missions.applySave(data);
+      if (data.pos) CVH.debug.teleport(data.pos.x, data.pos.z);
+    }
+  }
+
+  function setState(next) {
+    state = next;
+    el('titleScreen').style.display = next === 'menu' ? 'flex' : 'none';
+    el('pauseMenu').style.display = next === 'paused' ? 'flex' : 'none';
+    el('endingScreen').style.display = next === 'ending' ? 'flex' : 'none';
+    el('hud').style.visibility = (next === 'playing' || next === 'paused') ? 'visible' : 'hidden';
+    if (next === 'menu') dayT = 0.86; // title screen lives at golden hour
+  }
+
+  function startPlay(fresh) {
+    CVH.audio.ensure();
+    if (fresh) newGame(); else continueGame();
+    setState('playing');
+    CVH.input.lock(renderer.domElement);
+  }
+
+  function busted() {
+    const p = CVH.player;
+    const fine = Math.min(p.cash, 150);
+    p.cash -= fine;
+    CVH.audio.bustedJingle();
+    CVH.missions.cancel();
+    CVH.police.reset();
+    p.reset(CVH.world.points.policeStation);
+    CVH.hud.banner('BUSTED', 'The C.V.P.D. takes $' + fine + ' and your afternoon.');
+    save();
+  }
+
+  function wasted() {
+    const p = CVH.player;
+    const bill = Math.min(p.cash, 100);
+    p.cash -= bill;
+    CVH.audio.bustedJingle();
+    CVH.missions.cancel();
+    CVH.police.reset();
+    p.reset(CVH.world.points.hospital);
+    CVH.hud.banner('WASTED', 'St. Verde General patches you up for $' + bill + '.');
+    save();
+  }
+
+  // ------------------------------------------------------------ simulation
+  function updateSim(dt) {
+    if (state === 'menu') {
+      // the city lives behind the title: traffic and citizens keep moving
+      CVH.vehicles.update(dt);
+      CVH.peds.update(dt);
+      menuAngle += dt * 0.05;
+      const cx = 30 + Math.cos(menuAngle) * 118;
+      const cz = Math.sin(menuAngle) * 118;
+      camera.position.set(cx, 42, cz);
+      camera.lookAt(30, 6, 0);
+      CVH.world.updateSky(0.86, scene);
+      return;
+    }
+    if (state !== 'playing' && state !== 'ending') return;
+    if (state === 'playing') {
+      CVH.player.update(dt);
+      // camera follow makes driving feel right: ease camYaw behind the car
+      if (CVH.player.state === 'car' && CVH.player.car && Math.abs(CVH.player.car.speed) > 2) {
+        CVH.player.camYaw = CVH.turnToward(CVH.player.camYaw, CVH.player.car.heading, 1.6 * dt);
+      }
+    }
+    CVH.vehicles.update(dt);
+    CVH.police.update(dt);
+    CVH.peds.update(dt);
+    CVH.missions.update(dt);
+    dayT = (dayT + dt / 420) % 1;
+    CVH.world.updateSky(dayT, scene);
+    updateCamera(dt);
+    CVH.hud.update();
+    saveTick += dt;
+    if (saveTick > 6) { saveTick = 0; save(); }
+  }
+
+  const camPos = new THREE.Vector3(60, 30, 90);
+  function updateCamera(dt) {
+    const p = CVH.player;
+    let tx, ty, tz, lx, ly, lz;
+    if (p.state === 'car' && p.car) {
+      const cp = p.car.mesh.position;
+      const f = CVH.forwardOf(p.camYaw);
+      tx = cp.x - f.x * 10.5; tz = cp.z - f.z * 10.5; ty = 4.1;
+      lx = cp.x + f.x * 8; lz = cp.z + f.z * 8; ly = 1.4;
+    } else {
+      const f = CVH.forwardOf(p.camYaw);
+      tx = p.pos.x - f.x * 7.6; tz = p.pos.z - f.z * 7.6; ty = 2.1 + p.camPitch * 3.6;
+      lx = p.pos.x + f.x * 5; lz = p.pos.z + f.z * 5; ly = 1.65;
+    }
+    const k = 1 - Math.exp(-dt * 7);
+    camPos.x += (tx - camPos.x) * k;
+    camPos.y += (ty - camPos.y) * k;
+    camPos.z += (tz - camPos.z) * k;
+    camPos.y = Math.max(0.7, camPos.y);
+    camera.position.copy(camPos);
+    camera.lookAt(lx, ly, lz);
+  }
+
+  function loop(ts) {
+    requestAnimationFrame(loop);
+    const dt = Math.min(0.05, lastTs ? (ts - lastTs) / 1000 : 0.016);
+    lastTs = ts;
+    if (!CVH.debug.freeze) updateSim(dt);
+    else if (state === 'playing') CVH.hud.update();
+    renderer.render(scene, camera);
+  }
+
+  CVH.debug.step = function (dt) { updateSim(dt); };
+  CVH.debug.getCameraPos = function () {
+    return camera ? { x: camera.position.x, y: camera.position.y, z: camera.position.z } : null;
+  };
+
+  // ------------------------------------------------------------ boot
   function boot() {
-    CVH.hud.grab();
-    var container = $('game');
+    const container = el('gameContainer');
     try {
       renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     } catch (e) {
-      show('nogl', 'flex');
-      show('menu', 'none');
+      el('webglError').style.display = 'flex';
       return;
     }
+    if (!renderer) { el('webglError').style.display = 'flex'; return; }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     renderer.setSize(window.innerWidth, window.innerHeight);
     container.appendChild(renderer.domElement);
+
+    scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0xc25e63, 190, 560);
     camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 900);
+    camera.position.copy(camPos);
+
+    CVH.world.build(scene);
+    CVH.vehicles.spawnInitial(scene);
+    CVH.peds.spawnInitial(scene);
+    CVH.player.build(scene);
+    CVH.missions.build(scene);
+    CVH.hud.init();
+    CVH.input.init(renderer.domElement);
+
+    CVH.police.onBusted = busted;
+    CVH.player.onWasted = wasted;
+    CVH.missions.onEnding = function () {
+      setState('ending');
+      CVH.audio.jobDone();
+      save();
+    };
+    CVH.missions.onProgress = function () { save(); };
+
+    CVH.input.onLockLost = function () {
+      if (state === 'playing') setState('paused');
+    };
+    CVH.input.onAnyKey = function (code) {
+      if (code === 'KeyM') { CVH.audio.ensure(); CVH.audio.toggleMuted(); }
+      if (state === 'playing') {
+        if (code === 'KeyF') CVH.player.toggleCar();
+        if (code === 'KeyT') CVH.missions.startTaxi();
+        if (code === 'KeyP') setState('paused');
+      } else if (state === 'paused' && (code === 'KeyP' || code === 'Escape')) {
+        setState('playing');
+        CVH.input.lock(renderer.domElement);
+      }
+    };
+    renderer.domElement.addEventListener('mousedown', function () {
+      if (state !== 'playing') return;
+      if (!CVH.input.isLocked()) { CVH.audio.ensure(); CVH.input.lock(renderer.domElement); }
+      else CVH.player.shoot();
+    });
     window.addEventListener('resize', function () {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    W.build();
-    CVH.vehicles.initTraffic(W.PLACES.porch.x, W.PLACES.porch.z);
-    CVH.peds.init();
-    CVH.player.build();
-    CVH.missions.buildPickups();
-    CVH.hud.syncSoundLabel();
+    // menu buttons
+    el('newGameBtn').addEventListener('click', function () { startPlay(true); });
+    el('continueBtn').addEventListener('click', function () { startPlay(false); });
+    el('resumeBtn').addEventListener('click', function () { setState('playing'); CVH.input.lock(renderer.domElement); });
+    el('restartBtn').addEventListener('click', function () { newGame(); setState('playing'); CVH.input.lock(renderer.domElement); });
+    el('saveBtn').addEventListener('click', function () { save(); CVH.hud.toast('Saved.'); });
+    el('pauseSoundBtn').addEventListener('click', function () { CVH.audio.ensure(); CVH.audio.toggleMuted(); });
+    el('endingCloseBtn').addEventListener('click', function () { setState('playing'); CVH.input.lock(renderer.domElement); });
+    if (!hasSave()) el('continueBtn').classList.add('disabled');
 
-    // ---- UI wiring ----
-    $('btnNewGame').addEventListener('click', function () { CVH.audio.click(); newGame(); });
-    $('btnContinue').addEventListener('click', function () { CVH.audio.click(); continueGame(); });
-    $('btnResume').addEventListener('click', function () { CVH.audio.click(); resume(); });
-    $('btnSave').addEventListener('click', function () { CVH.audio.click(); saveGame(); CVH.hud.toast('Game saved'); });
-    $('btnRestart').addEventListener('click', function () { CVH.audio.click(); newGame(); });
-    $('btnQuit').addEventListener('click', function () { CVH.audio.click(); setState('menu'); });
-    $('btnEnding').addEventListener('click', function () { CVH.audio.click(); setState('playing'); });
-    document.querySelectorAll('.btnSound').forEach(function (b) {
-      b.addEventListener('click', function () { CVH.audio.toggleMute(); });
-    });
-    renderer.domElement.addEventListener('click', function () {
-      if (state === 'playing' && !CVH.input.locked) CVH.input.lock(CVH.renderer.domElement);
-    });
-    refreshContinue();
-
+    // title-screen stat chips are static HTML; refresh continue availability
     setState('menu');
-    started = true;
-    requestAnimationFrame(frame);
-    if (CVH.shots) CVH.shots.init();
+    CVH.world.updateSky(0.86, scene);
+    CVH.debug.ready = true;
+    requestAnimationFrame(loop);
   }
 
-  function refreshContinue() {
-    var has = !!CVH.store.get(SAVE_KEY);
-    var b = $('btnContinue');
-    if (b) { b.disabled = !has; b.style.opacity = has ? '1' : '0.45'; }
-  }
-
-  function resetPlayer() {
-    var P = CVH.player.data;
-    if (P.driving) CVH.player.exitCar();
-    P.x = W.PLACES.porch.x; P.z = W.PLACES.porch.z - 8;
-    P.heading = Math.PI;
-    P.hp = P.maxHp; P.cash = 120; P.weapon = 'fist'; P.dead = false;
-    camYaw = Math.PI;
-  }
-
-  function newGame() {
-    CVH.store.remove(SAVE_KEY);
-    CVH.missions.reset();
-    CVH.police.setHeat(0);
-    resetPlayer();
-    setState('playing');
-    CVH.hud.toast('Welcome to Costa Verde. Marisol has work for you.');
-  }
-
-  function saveGame() {
-    var P = CVH.player.data;
-    var data = {
-      cash: P.cash, hp: P.hp, weapon: P.weapon,
-      jobIndex: CVH.missions.jobIndex, x: P.x, z: P.z,
-      packages: CVH.missions.packagesTakenCount()
-    };
-    CVH.store.set(SAVE_KEY, JSON.stringify(data));
-    refreshContinue();
-  }
-
-  function continueGame() {
-    var raw = CVH.store.get(SAVE_KEY);
-    if (!raw) return;
-    var data = null;
-    try { data = JSON.parse(raw); } catch (e) { data = null; }
-    if (!data) return;
-    CVH.missions.reset();
-    CVH.missions.setJobIndex(data.jobIndex || 0);
-    var P = CVH.player.data;
-    if (P.driving) CVH.player.exitCar();
-    P.cash = data.cash || 0; P.hp = data.hp || 100; P.weapon = data.weapon || 'fist';
-    P.x = data.x || W.PLACES.porch.x; P.z = data.z || W.PLACES.porch.z - 8;
-    P.dead = false;
-    CVH.police.setHeat(0);
-    setState('playing');
-    CVH.hud.toast('Welcome back to Costa Verde.');
-  }
-
-  function pauseGame() { if (state === 'playing') setState('paused'); }
-  function resume() { if (state === 'paused') setState('playing'); }
-
-  CVH.onLockLost = function () { if (state === 'playing') pauseGame(); };
-  CVH.onBusted = function () {
-    var P = CVH.player.data;
-    CVH.missions.cancel(); // single cleanup path
-    var fine = Math.floor(P.cash * 0.15);
-    P.cash -= fine;
-    CVH.police.setHeat(0);
-    if (P.driving) CVH.player.exitCar();
-    P.x = W.PLACES.porch.x; P.z = W.PLACES.porch.z - 8;
-    P.hp = Math.max(60, P.hp);
-    CVH.audio.fail();
-    CVH.hud.toast('BUSTED! The cops took $' + fine + '. Marisol is not impressed.');
-  };
-  CVH.onWasted = function () {
-    var P = CVH.player.data;
-    CVH.missions.cancel(); // single cleanup path
-    CVH.police.setHeat(Math.floor(CVH.police.heat / 2));
-    if (P.driving) CVH.player.exitCar();
-    P.x = W.PLACES.hospital.x; P.z = W.PLACES.hospital.z + 4;
-    P.hp = 100; P.dead = false;
-    P.cash = Math.max(0, P.cash - 50);
-    CVH.hud.toast('WASTED! Hospital bill: $50.');
-  };
-  CVH.onEnding = function () {
-    setState('ending');
-    CVH.audio.success();
-  };
-
-  // ---------------- simulation tick ----------------
-  function tick(dt) {
-    var P = CVH.player.data;
-    if (state === 'menu') {
-      // living title screen: the city keeps simulating behind the menu
-      W.setDayT(0.86); // golden hour, held
-      menuAngle += dt * 0.045;
-      var cx = Math.cos(menuAngle) * 118;
-      var cz = Math.sin(menuAngle) * 118;
-      camera.position.set(cx, 42, cz);
-      camera.lookAt(0, 8, 0);
-      CVH.vehicles.updateTraffic(dt, 0, 0);
-      CVH.peds.update(dt, 0, 0, CVH.threat);
-      if (CVH.threat.t > 0) { CVH.threat.t -= dt; if (CVH.threat.t <= 0) CVH.threat.active = false; }
-      return;
-    }
-    if (state !== 'playing') return;
-
-    W.advanceDay(dt);
-    // mouse look
-    if (CVH.input.locked) {
-      var md = CVH.input.consumeMouse();
-      camYaw -= md.dx * 0.0031;
-      camPitch = U.clamp(camPitch + md.dy * 0.0026, 0.06, 1.1);
-    }
-    if (CVH.input.pressed('KeyM')) CVH.audio.toggleMute();
-    if (CVH.input.pressed('KeyP')) { pauseGame(); CVH.input.endFrame(); return; }
-
-    CVH.player.update(dt, camYaw);
-    CVH.vehicles.updateTraffic(dt, P.x, P.z);
-    CVH.peds.update(dt, P.x, P.z, CVH.threat);
-    if (CVH.threat.t > 0) { CVH.threat.t -= dt; if (CVH.threat.t <= 0) CVH.threat.active = false; }
-    CVH.police.update(dt, P);
-    CVH.missions.update(dt);
-    CVH.fx.update(dt);
-    updateCamera(dt, P);
-    CVH.hud.update();
-    CVH.input.endFrame();
-  }
-
-  function updateCamera(dt, P) {
-    if (P.driving) {
-      var car = P.driving;
-      var targetYaw = car.heading;
-      var dh = U.wrapAngle(targetYaw - camYaw);
-      camYaw += dh * Math.min(1, dt * 4.5);
-      var f = U.fwd(camYaw);
-      var dist = 10.5, hgt = 4.2;
-      camera.position.set(car.x - f.x * dist, hgt, car.z - f.z * dist);
-      camera.lookAt(car.x + f.x * 6, 1.6, car.z + f.z * 6);
-    } else {
-      var f2 = U.fwd(camYaw);
-      var d2 = 7.6;
-      var y = 1.7 + Math.sin(camPitch) * 4.4;
-      camera.position.set(P.x - f2.x * d2 * Math.cos(camPitch), y, P.z - f2.z * d2 * Math.cos(camPitch));
-      camera.lookAt(P.x + f2.x * 4, 1.7, P.z + f2.z * 4);
-      // keep the camera out of buildings
-      if (W.hitsBuilding(camera.position.x, camera.position.z, 0.4)) camera.position.y = 16;
-    }
-  }
-
-  var lastTs = 0;
-  function frame(ts) {
-    requestAnimationFrame(frame);
-    if (!renderer) return;
-    var dt = Math.min(0.05, lastTs ? (ts - lastTs) / 1000 : 0.016);
-    lastTs = ts;
-    if (!window.__manualStep) tick(dt);
-    else if (state === 'playing') { updateCamera(0.016, CVH.player.data); CVH.hud.update(); }
-    renderer.render(W.scene, camera);
-  }
-
-  // ---------------- debug hooks (used by the automated playtest) ----------------
-  CVH.debug = CVH.debug || {};
-  CVH.debug.step = function (dt) { tick(dt); if (renderer) renderer.render(W.scene, camera); };
-  CVH.debug.getState = function () { return state; };
-  CVH.debug.setState = function (s) { setState(s); };
-  CVH.debug.newGame = newGame;
-  CVH.debug.pauseGame = pauseGame;
-  CVH.debug.setCamYaw = function (y) { camYaw = y; };
-  CVH.debug.getCamYaw = function () { return camYaw; };
-  CVH.debug.menuCamPos = function () { return { x: camera.position.x, y: camera.position.y, z: camera.position.z }; };
-  CVH.debug.teleport = function (x, z) {
-    var P = CVH.player.data;
-    if (P.driving) { P.driving.x = x; P.driving.z = z; CVH.vehicles.syncMesh(P.driving); P.x = x; P.z = z; }
-    else { P.x = x; P.z = z; }
-  };
-  CVH.debug.setHeading = function (h) {
-    var P = CVH.player.data;
-    P.heading = h;
-    if (P.driving) { P.driving.heading = h; CVH.vehicles.syncMesh(P.driving); }
-  };
-  CVH.debug.saveGame = saveGame;
-  CVH.renderer = null;
-
-  document.addEventListener('DOMContentLoaded', function () {
-    boot();
-    CVH.renderer = renderer;
-    CVH.debug.camera = camera;
-  });
-  CVH.getState = function () { return state; };
-  Object.defineProperty(CVH, 'state', { get: function () { return state; } });
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
 })();

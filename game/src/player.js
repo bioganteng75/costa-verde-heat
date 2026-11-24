@@ -1,221 +1,222 @@
-// player.js — the runner: low-poly character, procedural walk, camera-basis
-// movement (right = forward x up), combat, entering/exiting vehicles.
-// The logical position (player.x/z) rides with the car while driving, so
-// missions, police and the minimap all read the car position.
-(function () {
-  'use strict';
-  var U = CVH.util;
-  var W = CVH.world;
+// Costa Verde Heat — the player: on-foot movement (camera-relative, right
+// vector = cross(forward, up) from the real camera), driving, car entry,
+// hitscan combat, health. The logical position rides with the car while
+// driving (vehicles.driveUpdate mirrors it) so missions/police/minimap all
+// read the car's position.
+CVH.player = (function () {
+  const WALK = 4.7, RUN = 7.4;
 
-  function mat(c) { return new THREE.MeshLambertMaterial({ color: c }); }
+  const api = {
+    pos: { x: 24, z: 44 },
+    heading: 0,
+    camYaw: 0,
+    camPitch: 0.32,
+    health: 100,
+    cash: 120,
+    car: null,
+    state: 'foot',           // 'foot' | 'car'
+    weapon: null,            // null | 'pistol' | 'smg'
+    ammo: { pistol: 0, smg: 0 },
+    mesh: null,
+    walkPhase: 0,
+    shootCd: 0,
+    onWasted: null,          // installed by main.js
 
-  var mesh = null, legL = null, legR = null, armL = null, armR = null;
-  var P = {
-    x: 8, z: 206, heading: Math.PI, hp: 100, maxHp: 100,
-    cash: 120, weapon: 'fist', driving: null, walkPhase: 0,
-    fireCd: 0, dead: false, speedNow: 0
-  };
+    build: function (scene) {
+      const g = new THREE.Group();
+      const denim = new THREE.MeshLambertMaterial({ color: 0x2c3e57 });
+      const legL = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.82, 0.21), denim);
+      legL.geometry.translate(0, -0.41, 0); legL.position.set(-0.12, 0.82, 0); g.add(legL);
+      const legR = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.82, 0.21), denim);
+      legR.geometry.translate(0, -0.41, 0); legR.position.set(0.12, 0.82, 0); g.add(legR);
+      const torso = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.68, 0.27), new THREE.MeshLambertMaterial({ color: 0xb03a2e }));
+      torso.position.y = 1.16; g.add(torso);
+      const armMat = new THREE.MeshLambertMaterial({ color: 0xa03428 });
+      const armL = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.62, 0.15), armMat);
+      armL.geometry.translate(0, -0.31, 0); armL.position.set(-0.34, 1.44, 0); g.add(armL);
+      const armR = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.62, 0.15), armMat);
+      armR.geometry.translate(0, -0.31, 0); armR.position.set(0.34, 1.44, 0); g.add(armR);
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 12, 10), new THREE.MeshLambertMaterial({ color: 0xc98a5a }));
+      head.position.y = 1.68; g.add(head);
+      const hair = new THREE.Mesh(new THREE.SphereGeometry(0.175, 12, 8, 0, Math.PI * 2, 0, 1.4), new THREE.MeshLambertMaterial({ color: 0x241a12 }));
+      hair.position.y = 1.7; g.add(hair);
+      g.userData = { legL: legL, legR: legR, armL: armL, armR: armR };
+      g.position.set(api.pos.x, 0, api.pos.z);
+      scene.add(g);
+      api.mesh = g;
+    },
 
-  function build() {
-    mesh = new THREE.Group();
-    legL = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.85, 0.24), mat(0x27324a));
-    legL.position.set(-0.15, 0.43, 0); mesh.add(legL);
-    legR = legL.clone(); legR.position.x = 0.15; mesh.add(legR);
-    var torso = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.8, 0.36), mat(0xd8542e));
-    torso.position.y = 1.26; mesh.add(torso);
-    armL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.72, 0.2), mat(0xd8542e));
-    armL.position.set(-0.45, 1.28, 0); mesh.add(armL);
-    armR = armL.clone(); armR.position.x = 0.45; mesh.add(armR);
-    var head = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.38, 0.36), mat(0xd9a877));
-    head.position.y = 1.9; mesh.add(head);
-    var cap = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.12, 0.44), mat(0x1c2a38));
-    cap.position.y = 2.12; mesh.add(cap);
-    var brim = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.05, 0.3), mat(0x1c2a38));
-    brim.position.set(0, 2.06, 0.32); mesh.add(brim);
-    mesh.position.set(P.x, 0, P.z);
-    W.scene.add(mesh);
-    return mesh;
-  }
+    reset: function (toSpawn) {
+      const s = toSpawn || CVH.world.points.spawn;
+      api.pos.x = s.x; api.pos.z = s.z;
+      api.heading = 0; api.camYaw = 0;
+      api.health = 100;
+      if (api.car) { api.car.driver = null; api.car = null; }
+      api.state = 'foot';
+      if (api.mesh) { api.mesh.visible = true; api.mesh.position.set(s.x, 0, s.z); api.mesh.rotation.y = 0; }
+    },
 
-  function witnessCrime(amount, x, z) {
-    var witnessed = false;
-    CVH.peds.list.forEach(function (p) {
-      if (p.visible && U.dist(p.x, p.z, x, z) < 30) witnessed = true;
-    });
-    if (CVH.police && CVH.police.force.length) witnessed = true;
-    if (witnessed && CVH.police) CVH.police.addHeat(amount);
-    CVH.threat.x = x; CVH.threat.z = z; CVH.threat.active = true; CVH.threat.t = 1.2;
-  }
-
-  function attack() {
-    var f = U.fwd(P.heading);
-    if (P.weapon === 'fist') {
-      CVH.audio.punch();
-      var tx = P.x + f.x * 1.6, tz = P.z + f.z * 1.6;
-      var hit = false;
-      CVH.peds.list.forEach(function (p) {
-        if (p.visible && U.dist(p.x, p.z, tx, tz) < 1.4) {
-          p.fleeT = 3; hit = true;
-          if (CVH.fx) CVH.fx.burst(p.x, 1.4, p.z, 0xd8542e, 6);
-        }
-      });
-      var car = CVH.vehicles.nearestCar(tx, tz, 2.2);
-      if (car) { CVH.vehicles.damage(car, 4); hit = true; }
-      if (hit) witnessCrime(18, P.x, P.z);
-      P.fireCd = 0.32;
-      return;
-    }
-    // hitscan weapon
-    var rate = P.weapon === 'smg' ? 0.1 : 0.34;
-    P.fireCd = rate;
-    CVH.audio.shot(P.weapon === 'smg');
-    if (CVH.fx) CVH.fx.muzzle(P.x + f.x * 0.7, 1.45, P.z + f.z * 0.7);
-    var bestT = 42, bestPed = null, bestCar = null;
-    CVH.peds.list.forEach(function (p) {
-      if (!p.visible) return;
-      var dx = p.x - P.x, dz = p.z - P.z;
-      var t = dx * f.x + dz * f.z;
-      if (t < 0 || t > bestT) return;
-      var side = Math.abs(dx * -f.z + dz * f.x);
-      if (side < 0.8) { bestT = t; bestPed = p; bestCar = null; }
-    });
-    CVH.vehicles.cars.forEach(function (c) {
-      if (c.dead) return;
-      var dx = c.x - P.x, dz = c.z - P.z;
-      var t = dx * f.x + dz * f.z;
-      if (t < 0 || t > bestT) return;
-      var side = Math.abs(dx * -f.z + dz * f.x);
-      if (side < 1.6) { bestT = t; bestCar = c; bestPed = null; }
-    });
-    if (bestPed) {
-      bestPed.fleeT = 4;
-      if (CVH.fx) CVH.fx.burst(bestPed.x, 1.3, bestPed.z, 0xb83030, 10);
-      witnessCrime(30, P.x, P.z);
-    } else if (bestCar) {
-      CVH.vehicles.damage(bestCar, P.weapon === 'smg' ? 7 : 16);
-      if (CVH.fx) CVH.fx.burst(bestCar.x, 1, bestCar.z, 0xffca6a, 6);
-      witnessCrime(22, P.x, P.z);
-    } else {
-      witnessCrime(12, P.x, P.z);
-    }
-  }
-
-  function enterCar(car) {
-    if (!car || car.dead) return false;
-    var wasPolice = car.driver === 'police' || car.type === 'police';
-    if (car.type === 'police' && CVH.police) CVH.police.removeFromForce(car); // fix: stolen cruiser leaves the force NOW
-    if (car.driver === 'traffic') witnessCrime(20, P.x, P.z);
-    if (wasPolice) witnessCrime(26, P.x, P.z);
-    car.driver = 'player';
-    car.lane = null;
-    P.driving = car;
-    mesh.visible = false;
-    CVH.audio.engine();
-    if (car.isMissionCar && CVH.missions) CVH.missions.onSteal(car);
-    return true;
-  }
-  function exitCar() {
-    var car = P.driving;
-    if (!car) return;
-    car.driver = 'parked';
-    car.speed = 0;
-    P.driving = null;
-    var r = U.rightOf(U.fwd(car.heading));
-    P.x = car.x - r.x * 2.0;
-    P.z = car.z - r.z * 2.0;
-    var c = W.collide(P.x, P.z, 0.5);
-    P.x = c.x; P.z = c.z;
-    mesh.visible = true;
-  }
-
-  function update(dt, camYaw) {
-    if (P.dead) return;
-    P.fireCd = Math.max(0, P.fireCd - dt);
-    var input = CVH.input;
-
-    if (P.driving) {
-      var car = P.driving;
-      var throttle = (input.down('KeyW') || input.down('ArrowUp') ? 1 : 0) + (input.down('KeyS') || input.down('ArrowDown') ? -1 : 0);
-      var steer = (input.down('KeyA') || input.down('ArrowLeft') ? 1 : 0) + (input.down('KeyD') || input.down('ArrowRight') ? -1 : 0);
-      // A steers toward increasing heading (same handedness as on-foot strafe)
-      CVH.vehicles.driveStep(car, throttle, steer, dt);
-      P.x = car.x; P.z = car.z; // logical position rides with the car
-      P.heading = car.heading;
-      P.speedNow = Math.abs(car.speed);
-      if (car.speed > 14) { CVH.threat.x = P.x; CVH.threat.z = P.z; CVH.threat.active = true; CVH.threat.t = 0.4; }
-      if (input.pressed('KeyE')) exitCar();
-      return;
-    }
-
-    // on foot: camera-basis movement, right = forward x up
-    var f = U.fwd(camYaw);
-    var r = U.rightOf(f);
-    var mf = (input.down('KeyW') || input.down('ArrowUp') ? 1 : 0) - (input.down('KeyS') || input.down('ArrowDown') ? 1 : 0);
-    var mr = (input.down('KeyD') || input.down('ArrowRight') ? 1 : 0) - (input.down('KeyA') || input.down('ArrowLeft') ? 1 : 0);
-    var mx = f.x * mf + r.x * mr;
-    var mz = f.z * mf + r.z * mr;
-    var len = Math.sqrt(mx * mx + mz * mz);
-    var speed = 4.7;
-    P.speedNow = 0;
-    if (len > 0.01) {
-      mx /= len; mz /= len;
-      P.x += mx * speed * dt;
-      P.z += mz * speed * dt;
-      P.speedNow = speed;
-      var targetHeading = Math.atan2(mx, mz);
-      var dh = U.wrapAngle(targetHeading - P.heading);
-      P.heading += dh * Math.min(1, dt * 10);
-      P.walkPhase += dt * 9;
-    }
-    var c = W.collide(P.x, P.z, 0.55);
-    P.x = U.clamp(c.x, W.BOUNDS.minX + 1, W.BOUNDS.maxX - 1);
-    P.z = U.clamp(c.z, W.BOUNDS.minZ + 1, W.BOUNDS.maxZ - 1);
-    if (!W.isOnLand(P.x, P.z)) P.x = Math.min(P.x, W.WATER_X - 0.6);
-
-    // traffic can hurt
-    CVH.vehicles.cars.forEach(function (car2) {
-      if (car2.driver === 'traffic' && Math.abs(car2.speed) > 5 && U.dist(car2.x, car2.z, P.x, P.z) < 1.9) {
-        hurt(12);
-        var f2 = U.fwd(car2.heading);
-        P.x += f2.x * 2.4; P.z += f2.z * 2.4;
+    damage: function (n) {
+      if (api.health <= 0) return;
+      api.health -= n;
+      CVH.audio.hurt();
+      if (api.health <= 0) {
+        api.health = 0;
+        if (api.onWasted) api.onWasted();
       }
-    });
+    },
 
-    if ((input.pressed('KeyF') || input.pressed('Mouse0')) && P.fireCd <= 0) attack();
-    if (input.pressed('KeyE')) {
-      var near = CVH.vehicles.nearestCar(P.x, P.z, 3.4);
-      if (near) enterCar(near);
+    nearestCar: function (maxD) {
+      let best = null, bd = maxD;
+      for (let i = 0; i < CVH.vehicles.list.length; i++) {
+        const c = CVH.vehicles.list[i];
+        const d = CVH.dist2d(api.pos.x, api.pos.z, c.mesh.position.x, c.mesh.position.z);
+        if (d < bd) { bd = d; best = c; }
+      }
+      return best;
+    },
+
+    enterCar: function (car) {
+      if (!car || car.dead) { if (car && car.dead) CVH.hud.toast('That wreck is going nowhere.'); return false; }
+      if (car.isPolice) CVH.police.stealCar(car);
+      if (car.driver === 'traffic') { car.driver = null; car.t = null; CVH.police.addHeat(6); }
+      car.driver = 'player';
+      api.car = car;
+      api.state = 'car';
+      api.pos.x = car.mesh.position.x; api.pos.z = car.mesh.position.z;
+      api.heading = car.heading;
+      api.mesh.visible = car.type === 'moto';
+      CVH.audio.blip();
+      return true;
+    },
+
+    exitCar: function () {
+      const car = api.car;
+      if (!car) return;
+      car.driver = null;
+      const r = CVH.rightOf(car.heading);
+      api.pos.x = CVH.clamp(car.mesh.position.x + r.x * 2.4, -268, 248);
+      api.pos.z = CVH.clamp(car.mesh.position.z + r.z * 2.4, -268, 268);
+      const fixed = CVH.world.collide(api.pos.x, api.pos.z, 0.55);
+      api.pos.x = fixed.x; api.pos.z = fixed.z;
+      api.car = null;
+      api.state = 'foot';
+      api.mesh.visible = true;
+      api.mesh.position.set(api.pos.x, 0, api.pos.z);
+    },
+
+    toggleCar: function () {
+      if (api.state === 'car') { api.exitCar(); return; }
+      const car = api.nearestCar(3.6);
+      if (car) api.enterCar(car);
+    },
+
+    shoot: function () {
+      if (!api.weapon || api.shootCd > 0 || api.state !== 'foot') return;
+      if (api.ammo[api.weapon] <= 0) { CVH.hud.toast('Out of ammo — find another pickup.'); return; }
+      api.ammo[api.weapon]--;
+      api.shootCd = api.weapon === 'smg' ? 0.11 : 0.34;
+      CVH.audio.shot();
+      CVH.police.addHeat(14);
+      const aim = CVH.forwardOf(api.camYaw);
+      CVH.peds.scare(api.pos.x, api.pos.z, 26);
+      // nearest ped or car inside a cone around the aim direction
+      let bestT = null, bestD = 36;
+      for (let i = 0; i < CVH.peds.list.length; i++) {
+        const p = CVH.peds.list[i];
+        if (p.downT > 0) continue;
+        const dx = p.mesh.position.x - api.pos.x, dz = p.mesh.position.z - api.pos.z;
+        const d = Math.sqrt(dx * dx + dz * dz);
+        if (d > 36) continue;
+        const dot = (dx / (d || 1)) * aim.x + (dz / (d || 1)) * aim.z;
+        if (dot > 0.965 && d < bestD) { bestD = d; bestT = { ped: p }; }
+      }
+      for (let i = 0; i < CVH.vehicles.list.length; i++) {
+        const c = CVH.vehicles.list[i];
+        const dx = c.mesh.position.x - api.pos.x, dz = c.mesh.position.z - api.pos.z;
+        const d = Math.sqrt(dx * dx + dz * dz);
+        if (d > 38) continue;
+        const dot = (dx / (d || 1)) * aim.x + (dz / (d || 1)) * aim.z;
+        if (dot > 0.94 && d < bestD) { bestD = d; bestT = { car: c }; }
+      }
+      if (bestT) {
+        if (bestT.ped) {
+          bestT.ped.downT = 6; bestT.ped.mesh.rotation.x = Math.PI / 2;
+          CVH.police.addHeat(16);
+        } else {
+          CVH.vehicles.damage(bestT.car, api.weapon === 'smg' ? 9 : 14, false);
+          if (bestT.car.isPolice) CVH.police.addHeat(10);
+        }
+      }
+    },
+
+    update: function (dt) {
+      api.shootCd = Math.max(0, api.shootCd - dt);
+      const input = CVH.input;
+      // mouse look
+      const md = input.consumeMouse();
+      if (input.isLocked()) {
+        api.camYaw -= md.dx * 0.0026;
+        api.camYaw = CVH.wrapAngle(api.camYaw);
+        api.camPitch = CVH.clamp(api.camPitch + md.dy * 0.0022, -0.15, 1.1);
+      }
+
+      if (api.state === 'car' && api.car) {
+        const car = api.car;
+        const throttle = (input.isDown('KeyW') || input.isDown('ArrowUp') ? 1 : 0) + (input.isDown('KeyS') || input.isDown('ArrowDown') ? -1 : 0);
+        const steer = (input.isDown('KeyA') || input.isDown('ArrowLeft') ? 1 : 0) + (input.isDown('KeyD') || input.isDown('ArrowRight') ? -1 : 0);
+        CVH.vehicles.driveUpdate(car, dt, throttle, steer);
+        api.mesh.position.set(car.mesh.position.x, 0.55, car.mesh.position.z);
+        api.mesh.rotation.y = car.heading;
+        return;
+      }
+
+      // on foot: camera-relative movement; right = cross(forward, up)
+      const f = CVH.forwardOf(api.camYaw);
+      const r = CVH.rightOf(api.camYaw);
+      let ix = 0, iz = 0;
+      if (input.isDown('KeyW') || input.isDown('ArrowUp')) iz += 1;
+      if (input.isDown('KeyS') || input.isDown('ArrowDown')) iz -= 1;
+      if (input.isDown('KeyD') || input.isDown('ArrowRight')) ix += 1;
+      if (input.isDown('KeyA') || input.isDown('ArrowLeft')) ix -= 1;
+      let mx = f.x * iz + r.x * ix;
+      let mz = f.z * iz + r.z * ix;
+      const len = Math.sqrt(mx * mx + mz * mz);
+      const moving = len > 0.01;
+      if (moving) {
+        mx /= len; mz /= len;
+        const speed = (input.isDown('ShiftLeft') || input.isDown('ShiftRight')) ? RUN : WALK;
+        api.pos.x += mx * speed * dt;
+        api.pos.z += mz * speed * dt;
+        const want = CVH.headingOf(mx, mz);
+        api.heading = CVH.turnToward(api.heading, want, 14 * dt);
+        api.walkPhase += dt * speed * 2.1;
+      } else if (input.isLocked()) {
+        api.heading = CVH.turnToward(api.heading, api.camYaw, 10 * dt);
+      }
+      const fixed = CVH.world.collide(api.pos.x, api.pos.z, 0.55);
+      api.pos.x = CVH.clamp(fixed.x, -268, 249);
+      api.pos.z = CVH.clamp(fixed.z, -268, 268);
+      if (api.mesh) {
+        api.mesh.position.set(api.pos.x, 0, api.pos.z);
+        api.mesh.rotation.y = api.heading;
+        const sw = moving ? Math.sin(api.walkPhase) * 0.62 : 0;
+        api.mesh.userData.legL.rotation.x = sw;
+        api.mesh.userData.legR.rotation.x = -sw;
+        api.mesh.userData.armL.rotation.x = -sw * 0.75;
+        api.mesh.userData.armR.rotation.x = sw * 0.75;
+      }
     }
-
-    // animate + place mesh
-    mesh.position.set(P.x, 0, P.z);
-    mesh.rotation.y = P.heading;
-    var swing = P.speedNow > 0 ? Math.sin(P.walkPhase) * 0.6 : 0;
-    legL.rotation.x = swing; legR.rotation.x = -swing;
-    armL.rotation.x = -swing * 0.8; armR.rotation.x = swing * 0.8;
-  }
-
-  function hurt(amount) {
-    if (P.dead) return;
-    P.hp -= amount;
-    CVH.audio.hurt();
-    if (P.hp <= 0) {
-      P.hp = 0; P.dead = true;
-      if (CVH.onWasted) CVH.onWasted();
-    }
-  }
-  function heal(amount) { P.hp = Math.min(P.maxHp, P.hp + amount); }
-
-  CVH.player = {
-    data: P,
-    build: build,
-    update: update,
-    enterCar: enterCar,
-    exitCar: exitCar,
-    attack: attack,
-    hurt: hurt,
-    heal: heal,
-    get mesh() { return mesh; }
   };
-  CVH.threat = { x: 0, z: 0, active: false, t: 0 };
+
+  CVH.debug.teleport = function (x, z) {
+    if (api.car) {
+      api.car.mesh.position.set(x, 0, z);
+      api.car.speed = 0;
+    }
+    api.pos.x = x; api.pos.z = z;
+    if (api.mesh && api.state === 'foot') api.mesh.position.set(x, 0, z);
+  };
+
+  return api;
 })();

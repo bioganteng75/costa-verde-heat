@@ -1,52 +1,56 @@
-// input.js — keyboard state, edge presses, pointer-lock mouse look.
-(function () {
-  'use strict';
+// Costa Verde Heat — keyboard + mouse input and pointer lock.
+// Losing pointer lock mid-play auto-pauses the game (requirement: Esc under
+// pointer lock must pause); main.js installs CVH.input.onLockLost.
+CVH.input = (function () {
+  const keys = {};
+  let mouseDX = 0, mouseDY = 0;
+  let locked = false;
 
-  var keys = {};
-  var pressedSet = {};
-  var mouseDX = 0;
-  var mouseDY = 0;
-  var locked = false;
+  const api = {
+    keys: keys,
+    onLockLost: null,
+    onAnyKey: null,
 
-  window.addEventListener('keydown', function (e) {
-    if (!keys[e.code]) pressedSet[e.code] = true;
-    keys[e.code] = true;
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].indexOf(e.code) >= 0) e.preventDefault();
-  });
-  window.addEventListener('keyup', function (e) { keys[e.code] = false; });
-  window.addEventListener('blur', function () { keys = {}; });
+    isDown: function (code) { return !!keys[code]; },
 
-  document.addEventListener('pointerlockchange', function () {
-    var was = locked;
-    locked = !!document.pointerLockElement;
-    if (was && !locked && CVH.onLockLost) CVH.onLockLost();
-  });
-  document.addEventListener('mousemove', function (e) {
-    if (!locked) return;
-    mouseDX += e.movementX || 0;
-    mouseDY += e.movementY || 0;
-  });
-
-  CVH.input = {
-    down: function (code) { return !!keys[code]; },
-    pressed: function (code) { return !!pressedSet[code]; },
-    // test hook: simulate a key state
-    setKey: function (code, isDown) {
-      if (isDown && !keys[code]) pressedSet[code] = true;
-      keys[code] = !!isDown;
-    },
-    endFrame: function () { pressedSet = {}; mouseDX = 0; mouseDY = 0; },
     consumeMouse: function () {
-      var d = { dx: mouseDX, dy: mouseDY };
+      const d = { dx: mouseDX, dy: mouseDY };
       mouseDX = 0; mouseDY = 0;
       return d;
     },
-    get locked() { return locked; },
+
+    isLocked: function () { return locked; },
+
     lock: function (el) {
-      try { if (el && el.requestPointerLock) el.requestPointerLock(); } catch (e) {}
+      if (el && el.requestPointerLock) {
+        try {
+          const p = el.requestPointerLock();
+          if (p && p.catch) p.catch(function () { /* headless may refuse */ });
+        } catch (e) { /* headless may refuse */ }
+      }
     },
-    unlock: function () {
-      try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {}
+
+    init: function (canvas) {
+      window.addEventListener('keydown', function (e) {
+        if (e.repeat) return;
+        keys[e.code] = true;
+        if (api.onAnyKey) api.onAnyKey(e.code);
+        if (['ArrowUp', 'ArrowDown', 'Space'].indexOf(e.code) >= 0) e.preventDefault();
+      });
+      window.addEventListener('keyup', function (e) { keys[e.code] = false; });
+      window.addEventListener('blur', function () { for (const k in keys) keys[k] = false; });
+
+      document.addEventListener('pointerlockchange', function () {
+        const was = locked;
+        locked = document.pointerLockElement === canvas;
+        if (was && !locked && api.onLockLost) api.onLockLost();
+      });
+      document.addEventListener('mousemove', function (e) {
+        if (!locked) return;
+        mouseDX += e.movementX || 0;
+        mouseDY += e.movementY || 0;
+      });
     }
   };
+  return api;
 })();

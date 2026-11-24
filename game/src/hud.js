@@ -1,128 +1,157 @@
-// hud.js — DOM HUD (cash, hp, stars, heat, speed, objective banner, toasts)
-// and the 2D minimap. The player marker is a TRIANGLE rotated by the live
-// heading on every redraw; the drawn angle is published to
-// CVH.debug.lastArrowAngle for verification.
-(function () {
-  'use strict';
-  var U = CVH.util;
-  var W = CVH.world;
+// Costa Verde Heat — HUD: cash, stars, health, bust meter, objective line,
+// prompts, banners, toasts, the SOUND label, and the 2D minimap whose player
+// arrow rotates with the live heading (published to CVH.debug.lastArrowAngle
+// on every draw).
+CVH.hud = (function () {
+  let els = {};
+  let bannerUntil = 0, toastUntil = 0;
+  let mapCtx = null;
 
-  var el = {};
-  var toastTimer = null;
+  function el(id) { return document.getElementById(id); }
 
-  function grab() {
-    ['hudCash', 'hudHpFill', 'hudStars', 'hudHeatFill', 'hudSpeed', 'hudWeapon',
-     'bannerText', 'bannerDist', 'toast', 'minimap', 'bustWrap', 'bustFill'].forEach(function (id) {
-      el[id] = document.getElementById(id);
-    });
-  }
+  const api = {
+    init: function () {
+      els = {
+        cash: el('hudCash'), stars: el('hudStars'), health: el('hudHealthFill'),
+        objective: el('hudObjective'), prompt: el('hudPrompt'),
+        banner: el('banner'), bannerTitle: el('bannerTitle'), bannerSub: el('bannerSub'),
+        toast: el('toast'), sound: el('soundLabel'), speed: el('hudSpeed'),
+        bustWrap: el('bustWrap'), bustFill: el('bustFill'),
+        map: el('minimap')
+      };
+      if (els.map) mapCtx = els.map.getContext('2d');
+      if (els.sound) els.sound.addEventListener('click', function () { CVH.audio.ensure(); CVH.audio.toggleMuted(); });
+      api.refreshSoundLabel();
+    },
 
-  function toast(msg, ms) {
-    if (!el.toast) return;
-    el.toast.textContent = msg;
-    el.toast.style.opacity = '1';
-    if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { el.toast.style.opacity = '0'; }, ms || 2600);
-  }
+    // The ONLY writer of sound-label text: called on init and by
+    // audio.setMuted, so the M key, HUD button and pause button never desync.
+    refreshSoundLabel: function () {
+      const label = 'SOUND: ' + (CVH.audio.muted ? 'OFF' : 'ON');
+      if (els.sound) els.sound.textContent = label;
+      const pb = el('pauseSoundBtn');
+      if (pb) pb.textContent = label;
+    },
 
-  function syncSoundLabel() {
-    var label = CVH.audio.muted ? 'OFF' : 'ON';
-    var nodes = document.querySelectorAll('.soundState');
-    for (var i = 0; i < nodes.length; i++) nodes[i].textContent = label;
-  }
+    banner: function (title, sub) {
+      if (!els.banner) return;
+      els.bannerTitle.textContent = title;
+      els.bannerSub.textContent = sub || '';
+      els.banner.classList.add('show');
+      bannerUntil = performance.now() + 2800;
+    },
 
-  function update() {
-    var P = CVH.player.data;
-    if (el.hudCash) el.hudCash.textContent = '$' + P.cash;
-    if (el.hudHpFill) el.hudHpFill.style.width = Math.max(0, P.hp) + '%';
-    if (el.hudStars) {
-      var s = '';
-      for (var i = 0; i < 5; i++) s += i < CVH.police.stars ? '★' : '☆';
-      el.hudStars.textContent = s;
+    toast: function (msg) {
+      if (!els.toast) return;
+      els.toast.textContent = msg;
+      els.toast.classList.add('show');
+      toastUntil = performance.now() + 2300;
+    },
+
+    setObjective: function (t) { if (els.objective) els.objective.textContent = t || ''; },
+    setPrompt: function (t) {
+      if (!els.prompt) return;
+      els.prompt.textContent = t || '';
+      els.prompt.style.opacity = t ? '1' : '0';
+    },
+
+    update: function () {
+      const now = performance.now();
+      if (els.banner && now > bannerUntil) els.banner.classList.remove('show');
+      if (els.toast && now > toastUntil) els.toast.classList.remove('show');
+      const p = CVH.player;
+      if (els.cash) els.cash.textContent = '$' + Math.floor(p.cash);
+      if (els.stars) {
+        const w = CVH.police.wanted();
+        els.stars.textContent = '★★★★★'.slice(0, w) + '☆☆☆☆☆'.slice(0, 5 - w);
+        els.stars.style.color = w > 0 ? '#ffc93c' : '#5a6068';
+      }
+      if (els.health) els.health.style.width = CVH.clamp(p.health, 0, 100) + '%';
+      if (els.bustWrap) {
+        const b = CVH.police.bust;
+        els.bustWrap.style.opacity = b > 0.02 ? '1' : '0';
+        if (els.bustFill) els.bustFill.style.width = Math.round(b * 100) + '%';
+      }
+      if (els.speed) {
+        if (p.state === 'car' && p.car) {
+          els.speed.textContent = Math.round(Math.abs(p.car.speed) * 3.6) + ' km/h';
+          els.speed.style.opacity = '1';
+        } else els.speed.style.opacity = '0';
+      }
+      api.drawMinimap();
+    },
+
+    drawMinimap: function () {
+      if (!mapCtx || !els.map) return;
+      const g = mapCtx;
+      const S = els.map.width;         // 176
+      const C = S / 2;
+      const scale = S / 300;           // 300 m across the map
+      const p = CVH.player;
+      function mx(wx) { return C + (wx - p.pos.x) * scale; }
+      function mz(wz) { return C + (wz - p.pos.z) * scale; }
+      g.clearRect(0, 0, S, S);
+      g.fillStyle = '#20262c';
+      g.fillRect(0, 0, S, S);
+      // water + beach
+      g.fillStyle = '#1d5f73';
+      g.fillRect(mx(CVH.world.WATER_X), 0, S, S);
+      g.fillStyle = '#d9c08a';
+      g.fillRect(mx(CVH.world.BEACH_X), 0, Math.max(0, mx(CVH.world.WATER_X) - mx(CVH.world.BEACH_X)), S);
+      // roads
+      g.strokeStyle = '#4a5058';
+      g.lineWidth = Math.max(1.5, CVH.world.ROAD_W * scale);
+      CVH.world.AVENUES_X.forEach(function (ax) {
+        g.beginPath(); g.moveTo(mx(ax), 0); g.lineTo(mx(ax), S); g.stroke();
+      });
+      CVH.world.STREETS_Z.forEach(function (sz) {
+        g.beginPath(); g.moveTo(0, mz(sz)); g.lineTo(S, mz(sz)); g.stroke();
+      });
+      // cash packages still out there
+      g.fillStyle = '#f2c230';
+      CVH.world.points.packages.forEach(function (pt, i) {
+        if (CVH.missions.packagesFound[i]) return;
+        g.fillRect(mx(pt.x) - 1.5, mz(pt.z) - 1.5, 3, 3);
+      });
+      // objective
+      const obj = CVH.missions.objectivePoint ? CVH.missions.objectivePoint() : null;
+      if (obj) {
+        g.fillStyle = '#ffc93c';
+        g.beginPath(); g.arc(mx(obj.x), mz(obj.z), 4, 0, Math.PI * 2); g.fill();
+        g.strokeStyle = 'rgba(255,201,60,0.5)';
+        g.lineWidth = 2;
+        g.beginPath(); g.arc(mx(obj.x), mz(obj.z), 6.5, 0, Math.PI * 2); g.stroke();
+      }
+      // police
+      g.fillStyle = '#5a8cff';
+      CVH.police.cars.forEach(function (c) {
+        if (c.dead) return;
+        g.fillRect(mx(c.mesh.position.x) - 2, mz(c.mesh.position.z) - 2, 4, 4);
+      });
+      // player arrow — rotated by the LIVE heading (car heading while driving)
+      const heading = (p.state === 'car' && p.car) ? p.car.heading : p.heading;
+      const angle = CVH.wrapAngle(-heading);
+      CVH.debug.lastArrowAngle = angle;
+      g.save();
+      g.translate(C, C);
+      g.rotate(angle);
+      g.beginPath();
+      g.moveTo(0, -8);
+      g.lineTo(5.4, 6.4);
+      g.lineTo(0, 3.4);
+      g.lineTo(-5.4, 6.4);
+      g.closePath();
+      g.fillStyle = '#ffffff';
+      g.fill();
+      g.lineWidth = 1.6;
+      g.strokeStyle = '#101216';
+      g.stroke();
+      g.restore();
+      // frame
+      g.strokeStyle = 'rgba(255,255,255,0.25)';
+      g.lineWidth = 2;
+      g.strokeRect(1, 1, S - 2, S - 2);
     }
-    if (el.hudHeatFill) el.hudHeatFill.style.width = (CVH.police.heat / 250 * 100) + '%';
-    if (el.hudSpeed) el.hudSpeed.textContent = P.driving ? Math.round(Math.abs(P.driving.speed) * 3.6) + ' km/h' : '';
-    if (el.hudWeapon) el.hudWeapon.textContent = P.weapon === 'fist' ? 'FISTS' : P.weapon.toUpperCase();
-    if (el.bustWrap) {
-      var b = CVH.police.bust;
-      el.bustWrap.style.display = b > 2 ? 'block' : 'none';
-      if (el.bustFill) el.bustFill.style.width = b + '%';
-    }
-    var obj = CVH.missions.currentObjective();
-    if (el.bannerText) {
-      var txt = obj.label;
-      if (obj.job) txt = obj.job + ' — ' + txt;
-      if (obj.timer !== null && obj.timer !== undefined) txt += ' · ' + Math.ceil(obj.timer) + 's';
-      el.bannerText.textContent = txt;
-    }
-    if (el.bannerDist) {
-      if (obj.x !== null && obj.x !== undefined) {
-        var d = Math.round(U.dist(P.x, P.z, obj.x, obj.z));
-        el.bannerDist.textContent = d + ' m';
-      } else el.bannerDist.textContent = '';
-    }
-    drawMinimap(P);
-  }
-
-  function drawMinimap(P) {
-    var cv = el.minimap;
-    if (!cv) return;
-    var ctx = cv.getContext('2d');
-    var S = cv.width; // 190
-    var EXT = 580, OFF = 290;
-    function mx(x) { return (x + OFF) / EXT * S; }
-    function mz(z) { return (z + OFF) / EXT * S; }
-    ctx.fillStyle = '#20303c';
-    ctx.fillRect(0, 0, S, S);
-    // water + sand
-    ctx.fillStyle = '#2e6f9e';
-    ctx.fillRect(mx(W.WATER_X), 0, S - mx(W.WATER_X), S);
-    ctx.fillStyle = '#e3cf9e';
-    ctx.fillRect(mx(W.SAND_X), 0, mx(W.WATER_X) - mx(W.SAND_X), S);
-    // roads
-    ctx.strokeStyle = '#596068';
-    ctx.lineWidth = Math.max(1, 14 / EXT * S);
-    W.VX.forEach(function (x) { ctx.beginPath(); ctx.moveTo(mx(x), 0); ctx.lineTo(mx(x), S); ctx.stroke(); });
-    W.HZ.forEach(function (z) { ctx.beginPath(); ctx.moveTo(0, mz(z)); ctx.lineTo(S, mz(z)); ctx.stroke(); });
-    // packages
-    ctx.fillStyle = '#51e06a';
-    W.PACKAGES.forEach(function (pk) { ctx.fillRect(mx(pk.x) - 1.5, mz(pk.z) - 1.5, 3, 3); });
-    // objective blip
-    var obj = CVH.missions.currentObjective();
-    if (obj.x !== null && obj.x !== undefined) {
-      ctx.fillStyle = '#ffc93c';
-      ctx.beginPath(); ctx.arc(mx(obj.x), mz(obj.z), 3.6, 0, Math.PI * 2); ctx.fill();
-    }
-    // police blips
-    CVH.vehicles.cars.forEach(function (c) {
-      if (c.type !== 'police' || c.dead) return;
-      ctx.fillStyle = (Math.floor(performance.now() / 300) % 2) ? '#ff5252' : '#4d7cff';
-      ctx.beginPath(); ctx.arc(mx(c.x), mz(c.z), 2.6, 0, Math.PI * 2); ctx.fill();
-    });
-    // player arrow — rotated by the LIVE heading every redraw
-    var f = U.fwd(P.heading);
-    var ang = Math.atan2(f.x, -f.z);
-    if (!CVH.debug) CVH.debug = {};
-    CVH.debug.lastArrowAngle = ang;
-    ctx.save();
-    ctx.translate(mx(P.x), mz(P.z));
-    ctx.rotate(ang);
-    ctx.fillStyle = '#ffffff';
-    ctx.strokeStyle = '#10131a';
-    ctx.beginPath();
-    ctx.moveTo(0, -6.5);
-    ctx.lineTo(4.4, 5);
-    ctx.lineTo(0, 2.4);
-    ctx.lineTo(-4.4, 5);
-    ctx.closePath();
-    ctx.fill(); ctx.stroke();
-    ctx.restore();
-  }
-
-  CVH.hud = {
-    grab: grab, toast: toast, update: update,
-    syncSoundLabel: syncSoundLabel, drawMinimap: drawMinimap,
-    get el() { return el; }
   };
-  if (!CVH.debug) CVH.debug = {};
+  return api;
 })();

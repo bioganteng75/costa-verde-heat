@@ -4,57 +4,55 @@
 [![rank](https://make.fun/badge/gta6-01/bioganteng75/costa-verde-heat/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 [![reward](https://make.fun/badge/gta6-01/bioganteng75/costa-verde-heat/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 
-**Costa Verde Heat** is an original third-person 3D open-world crime game that runs
-entirely in the browser. Cruise a fictional coastal city — avenues, a marina, a sandy
-beach and a pier — as a runner for fixer **Marisol Vega**. Take her 6 story jobs, run
-taxi fares, dodge a 0–5 star police heat system with pursuit AI and a bust meter, find
-14 hidden cash packages, and watch the city roll from day into a neon dusk.
+An original third-person 3D open-world crime game set in the fictional coastal
+city of Costa Verde, built on Three.js. Work six story jobs for fixer
+**Marisol Vega**, outrun a 0–5 star police force with pursuit AI and a bust
+meter, drive six vehicle types (including a motorcycle) through live traffic,
+run taxi fares, respray at the Pay 'n Spray, heal at food stands, hunt 14
+hidden cash packages, and watch the city roll from day to dusk on a 7-minute
+cycle. The title screen floats over the living, simulated city; the minimap
+compass arrow turns with your heading; progress saves locally.
 
-Built with Three.js (vendored, no network needed at runtime) and plain JavaScript —
-no build step, no server-side code.
+Entry for the [make.fun gta6-01 bounty](https://make.fun/bounty/gta6-01).
 
 ## Run it
 
-Open the game in any modern desktop browser:
+The game is fully static — no build step, no network:
 
-- Easiest: serve the `game/` folder with any static file server, e.g.
-  `npx serve game` or `python3 -m http.server -d game`, then open the page.
-- Or open `game/index.html` directly from disk.
+- Open `game/index.html` in desktop Chrome, **or**
+- serve the `game/` folder with any static file server and visit it.
 
-Click **NEW GAME**, then click the game once to capture the mouse for look controls.
+`main.ts` is the make.fun entry point: it builds the submission dossier from
+the game tree. It resolves every path from its own location, so it runs
+correctly no matter which working directory it is launched from:
 
-## What's in the city
-
-- Third-person character with procedural walk animation; orbit camera on foot,
-  chase camera in vehicles, pointer-lock mouse look
-- 6 vehicle types (sedan, coupe, taxi, van, motorcycle, police cruiser) with
-  traffic AI, parked cars, carjacking and a working Pay 'n Spray
-- Police system: heat and 0–5 stars, pursuit cruisers, bust meter, BUSTED/WASTED
-  respawns, and heat that only cools when no cruiser is in contact range
-- 6 story jobs (pickup/delivery, a coupe steal, a timed downtown dash, a marina
-  deal that draws heat, a mercy run, and a final score at the pier) ending with
-  a proper ending screen — then free roam
-- Taxi fares, healing food stands, pistol & SMG pickups, hidden cash packages
-- HUD with a live rotating-compass minimap, a ~7-minute day→dusk cycle, WebAudio
-  synth sound, and a localStorage save (CONTINUE on the title screen)
-- A living title screen: the menu floats over the simulated city at golden hour
+```sh
+node main.ts            # writes dossier.json, game/ and screenshots/ to /output
+```
 
 ## Controls
 
 | Keys | Action |
 | --- | --- |
-| WASD / arrows | Move / drive (A/D steer and strafe) |
-| Mouse (click game) | Look around |
-| E | Enter / exit vehicle |
-| F | Punch / fire weapon |
-| M | Sound on/off |
-| P | Pause (also auto-pauses if pointer lock is lost) |
+| W A S D / arrows | Move on foot, drive (A–D strafe & steer) |
+| Mouse (click to lock) | Orbit camera / look |
+| Shift | Run |
+| F | Enter / exit vehicle |
+| E | Talk to Marisol, eat at stands, interact |
+| T | Start taxi work |
+| Mouse click (locked) | Shoot, once you hold a weapon |
+| M | Sound on / off |
+| P / Esc | Pause (losing pointer lock auto-pauses) |
 
-## About this entry
+## Layout
 
-Built for the make.fun gta6-01 bounty — referral code rd8zvqpf.
-Bounty page: https://make.fun/bounty/gta6-01
+- `game/index.html` — the game shell, HUD, menus
+- `game/src/*.js` — engine and gameplay modules (world, vehicles, police,
+  missions, pedestrians, player, HUD/minimap, audio synth, safe storage)
+- `game/vendor/three.min.js` — vendored Three.js 0.147.0
+- `screenshots/` — four renders of the game (the first is the cover)
+- `vendor/makefun-game.ts` — the kit's dossier builder used by `main.ts`
 
-`main.ts` (run with Node) assembles the submission dossier into the output
-directory using the kit's `buildDossier`; `serve.ts` is the kit's local
-play server.
+---
+
+Built for the make.fun gta6-01 bounty — referral code rd8zvqpf
