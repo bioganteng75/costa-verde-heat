@@ -1,60 +1,82 @@
-// util.js — shared helpers for Costa Verde Heat 3D: seeded randomness, math,
-// formatting, and the safe storage wrapper every save/load goes through.
+'use strict';
+// Costa Verde Heat 3D — shared helpers: seeded randomness, small math, and a
+// fail-safe localStorage wrapper. Every other module hangs off window.CVH.
+
 window.CVH = window.CVH || {};
 
-CVH.u = {
-  clamp(v, a, b) { return v < a ? a : (v > b ? b : v); },
-  lerp(a, b, t) { return a + (b - a) * t; },
-  // Smoothly interpolate between two headings (radians), taking the short way.
-  angleLerp(a, b, t) {
-    let d = (b - a) % (Math.PI * 2);
-    if (d > Math.PI) d -= Math.PI * 2;
-    if (d < -Math.PI) d += Math.PI * 2;
-    return a + d * t;
-  },
-  angleDiff(a, b) {
-    let d = (b - a) % (Math.PI * 2);
-    if (d > Math.PI) d -= Math.PI * 2;
-    if (d < -Math.PI) d += Math.PI * 2;
-    return d;
-  },
-  dist2(x1, z1, x2, z2) { const dx = x2 - x1, dz = z2 - z1; return Math.sqrt(dx * dx + dz * dz); },
-  fmtMoney(n) { return '$' + Math.floor(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ','); },
-  fmtTime(sec) {
-    sec = Math.max(0, Math.ceil(sec));
-    return Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2);
-  },
-  // mulberry32: tiny deterministic PRNG so a seed always builds the same city.
-  rng(seed) {
-    let a = seed >>> 0;
-    return function () {
-      a |= 0; a = (a + 0x6D2B79F5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  },
-  range(r, a, b) { return a + r() * (b - a); },
-  pick(r, arr) { return arr[Math.floor(r() * arr.length) % arr.length]; },
+CVH.TAU = Math.PI * 2;
+CVH.UP = null; // set to a THREE.Vector3(0,1,0) by main.js once three.js is in
+
+CVH.clamp = function (v, a, b) { return v < a ? a : (v > b ? b : v); };
+CVH.lerp = function (a, b, t) { return a + (b - a) * t; };
+CVH.smooth = function (t) { t = CVH.clamp(t, 0, 1); return t * t * (3 - 2 * t); };
+
+// Deterministic PRNG (mulberry32) so a given seed always builds the same city.
+CVH.makeRng = function (seed) {
+  let s = (seed >>> 0) || 1;
+  return function () {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 };
 
-// Safe storage (QA fix): localStorage throws in sandboxed iframes and in some
-// privacy modes. Every read/write/delete in the game funnels through here and
-// degrades to "no save" instead of breaking a button or the boot sequence.
+// The live RNG; main.js reseeds it from the ?seed= parameter before world build.
+CVH.rng = CVH.makeRng(20261124);
+CVH.rand = function (a, b) { return a + CVH.rng() * (b - a); };
+CVH.randInt = function (a, b) { return Math.floor(CVH.rand(a, b + 1)); };
+CVH.pick = function (arr) { return arr[Math.floor(CVH.rng() * arr.length) % arr.length]; };
+CVH.chance = function (p) { return CVH.rng() < p; };
+
+CVH.dist2d = function (ax, az, bx, bz) {
+  const dx = ax - bx, dz = az - bz;
+  return Math.sqrt(dx * dx + dz * dz);
+};
+
+// Wrap an angle to [-PI, PI).
+CVH.angleWrap = function (a) {
+  while (a >= Math.PI) a -= CVH.TAU;
+  while (a < -Math.PI) a += CVH.TAU;
+  return a;
+};
+
+// Turn `current` toward `target` by at most `maxStep` radians.
+CVH.angleTurn = function (current, target, maxStep) {
+  const d = CVH.angleWrap(target - current);
+  if (Math.abs(d) <= maxStep) return target;
+  return current + Math.sign(d) * maxStep;
+};
+
+// Safe storage: sandboxed iframes (no allow-same-origin) throw on ANY
+// localStorage access, so every read/write/delete in the game goes through
+// this wrapper and simply degrades to "no save" when storage is unavailable.
 CVH.store = {
-  get(key) {
-    try { return window.localStorage.getItem(key); } catch (e) { return null; }
+  get: function (key) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw === null || raw === undefined) return null;
+      return JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
   },
-  set(key, value) {
-    try { window.localStorage.setItem(key, value); } catch (e) { /* storage unavailable: play on */ }
+  set: function (key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) { /* storage unavailable: the run simply is not saved */ }
   },
-  del(key) {
-    try { window.localStorage.removeItem(key); } catch (e) { /* nothing to delete anyway */ }
-  },
-  getJSON(key) {
-    const raw = this.get(key);
-    if (!raw) return null;
-    try { return JSON.parse(raw); } catch (e) { return null; }
-  },
-  setJSON(key, obj) { this.set(key, JSON.stringify(obj)); },
+  del: function (key) {
+    try {
+      localStorage.removeItem(key);
+    } catch (e) { /* nothing to delete when storage itself is unreachable */ }
+  }
+};
+
+// Format helpers for the HUD.
+CVH.fmtCash = function (n) { return '$' + Math.round(n).toLocaleString('en-US'); };
+CVH.fmtTime = function (sec) {
+  sec = Math.max(0, Math.ceil(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m + ':' + (s < 10 ? '0' : '') + s;
 };

@@ -1,126 +1,99 @@
-// shots.js — deterministic screenshot scenes for the entry's screenshots.
-// Each scene arranges REAL game state (the actual player, cars, police force,
-// mission state and HUD), freezes it, and lets main's shot branch render it.
-// Nothing here is a mock-up: it is the game, posed.
+'use strict';
+// Costa Verde Heat 3D — deterministic screenshot scenes for ?shot=<name>.
+// Each scene arranges REAL game state (the actual player, cars, police force
+// and HUD), freezes the simulation, and lets the renderer settle; main.js
+// counts frames and then sets window.__shotReady.
+
 CVH.shots = {
-  duskF: 0.1,
+  name: null,
 
-  _cam(focus, yaw, pitch, dist) {
-    const cp = Math.cos(pitch), sp = Math.sin(pitch);
-    const fx = Math.sin(yaw) * cp, fz = Math.cos(yaw) * cp;
-    CVH.main.camera.position.set(focus.x - fx * dist, focus.y + 1.7 + sp * dist, focus.z - fz * dist);
-    CVH.main.camera.lookAt(focus.x, focus.y + 1.55, focus.z);
-    CVH.camera.yaw = yaw;
-    CVH.camera.pitch = pitch;
-  },
-
-  _light(kind, focus) {
-    const M = CVH.main;
-    if (kind === 'dusk') {
-      M._sun.position.set(focus.x - 90, 30, focus.z + 46);
-      M._sun.intensity = 0.8;
-      M._sun.color.setHex(0xff9a4d);
-      M._hemi.intensity = 0.55;
-      M.scene.background.setHex(0xf2a56b);
-      M.scene.fog.color.setHex(0xf2a56b);
-      this.duskF = 0.85;
-    } else {
-      M._sun.position.set(focus.x + 55, 115, focus.z + 35);
-      M._sun.intensity = 1.18;
-      M._sun.color.setHex(0xfff2d8);
-      M._hemi.intensity = 0.78;
-      M.scene.background.setHex(0x8fd4f2);
-      M.scene.fog.color.setHex(0x8fd4f2);
-      this.duskF = 0.05;
-    }
-    M._sun.target.position.copy(focus);
-  },
-
-  _parkTraffic(x, z, heading, type, colorIdx) {
-    const car = CVH.vehicles.create(CVH.main.scene, type, x, z, heading, colorIdx);
-    car.driver = 'traffic';
-    CVH.main.cars.push(car);
-    return car;
-  },
-
-  setup(name) {
-    const M = CVH.main;
+  setup: function (name, scene) {
+    this.name = name;
+    const pl = CVH.player;
     const W = CVH.world;
-    const P = CVH.player;
-    M.cash = 860;
+    CVH.game.cash = 1250;
+
     if (name === 'cover') {
-      // Street level on the hotel avenue: hero with pistol drawn, traffic
-      // rolling past, towers all around, minimap alive.
-      const x = W.roadX(3), z = W.roadZ(3) + 2;
-      P.pos.set(x, 0, z);
-      P.heading = 0.5;
-      P.weapon = 'pistol';
-      P.gunMesh.visible = true;
-      P.h.armR.rotation.x = -1.45;
-      P.h.group.rotation.y = P.heading;
-      this._parkTraffic(x - 3.2, z - 16, 0, 'sedan', 1);
-      this._parkTraffic(x + 3.2, z + 13, Math.PI, 'taxi', 0);
-      this._parkTraffic(x - 3.2, z + 26, 0, 'sport', 2);
-      this._light('morning', P.pos);
-      this._cam(P.pos, P.heading, 0.15, 5.0);
-    } else if (name === 'drive') {
-      // Flat out up the coastal avenue at dusk, sea on the left shoulder.
-      const car = CVH.vehicles.create(M.scene, 'sport', W.roadX(8) - 2, W.roadZ(3), 0, 2);
-      car.driver = 'player';
-      car.speed = 26;
-      M.cars.push(car);
-      M.playerCar = car;
-      P.h.group.visible = false;
-      this._parkTraffic(W.roadX(8) + 3.4, W.roadZ(3) + 24, Math.PI, 'taxi', 0);
-      this._light('dusk', car.group.position);
-      this._cam(car.group.position, 0, 0.3, 10.5);
-    } else if (name === 'chase') {
-      // Four stars, finale job at the "shake the heat" step: two cruisers on
-      // the tail, two more angled across the road ahead as a roadblock.
-      const car = CVH.vehicles.create(M.scene, 'sedan', W.roadX(4), W.roadZ(2), 0, 3);
-      car.driver = 'player';
-      car.speed = 21;
-      M.cars.push(car);
-      M.playerCar = car;
-      P.h.group.visible = false;
-      const spots = [
-        { x: W.roadX(4) - 2.5, z: W.roadZ(2) - 10, h: 0.15 },
-        { x: W.roadX(4) + 3, z: W.roadZ(2) - 17, h: -0.1 },
-        { x: W.roadX(4) - 3.4, z: W.roadZ(2) + 27, h: 1.15 },
-        { x: W.roadX(4) + 3.4, z: W.roadZ(2) + 27, h: -1.15 },
-      ];
-      for (const s of spots) {
-        const cop = CVH.vehicles.create(M.scene, 'police', s.x, s.z, s.h, 0);
-        cop.driver = 'police';
-        cop.lightBar.redMat.emissiveIntensity = 2.4;
-        cop.lightBar.blueMat.emissiveIntensity = 2.4;
-        M.cars.push(cop);
-        CVH.police.cars.push(cop);
+      W.phase = 0.2;
+      W.applyTimeOfDay(scene);
+      pl.reset(130, 14, 2.55);
+      pl.weapon = 'pistol';
+      pl.camYaw = -0.59;
+      pl.camPitch = 0.15;
+      pl.camDist = 5.0;
+      // Traffic on the tower avenue, both directions.
+      const c1 = CVH.vehicles.makeCar(scene, 'sedan', 0x4a7fd8);
+      CVH.vehicles.placeCar(c1, 133.2, -18, Math.PI);
+      c1.driver = 'traffic';
+      const c2 = CVH.vehicles.makeCar(scene, 'sport', 0xd8574a);
+      CVH.vehicles.placeCar(c2, 126.8, 34, 0);
+      c2.driver = 'traffic';
+      const c3 = CVH.vehicles.makeCar(scene, 'taxi', 0xf2c230);
+      CVH.vehicles.placeCar(c3, 133.2, 44, Math.PI);
+      c3.driver = 'traffic';
+      // Pedestrians on the sidewalks either side of the avenue.
+      const spots = [[122.2, -40], [137.8, -60], [137.8, -28], [122.2, 6], [137.8, 24]];
+      for (let i = 0; i < spots.length && i < CVH.peds.length; i++) {
+        CVH.peds[i].parts.group.position.set(spots[i][0], 0, spots[i][1]);
       }
-      CVH.police.heat = 360;
-      CVH.police._recalc();
-      const def = CVH.missions.JOBS[5];
-      CVH.missions.jobIndex = 5;
-      CVH.missions.active = { def, steps: def.steps(), stepIdx: 1, timeLeft: 0, targetCar: null, cpIdx: 4 };
-      this._light('morning', car.group.position);
-      this._cam(car.group.position, 0, 0.32, 10.5);
+    } else if (name === 'drive') {
+      W.phase = 0.88; // dusk: lit windows, headlight beams
+      W.applyTimeOfDay(scene);
+      const car = CVH.vehicles.makeCar(scene, 'sport', 0xd8574a);
+      CVH.vehicles.placeCar(car, 185.2, 66, Math.PI);
+      car.vel.set(0, 0, -26);
+      car.speed = 26;
+      pl.forceEnter(car);
+      const taxi = CVH.vehicles.makeCar(scene, 'taxi', 0xf2c230);
+      CVH.vehicles.placeCar(taxi, 185.2, 38, Math.PI);
+      taxi.vel.set(0, 0, -17);
+      taxi.speed = 17;
+      taxi.driver = 'traffic';
+      const sedan = CVH.vehicles.makeCar(scene, 'sedan', 0xe8e4da);
+      CVH.vehicles.placeCar(sedan, 178.8, -6, 0);
+      sedan.driver = 'traffic';
+      pl.camYaw = Math.PI;
+      pl.camPitch = 0.26;
+      pl.camDist = 7.4;
+    } else if (name === 'chase') {
+      W.phase = 0.3;
+      W.applyTimeOfDay(scene);
+      const car = CVH.vehicles.makeCar(scene, 'sedan', 0x3a3f45);
+      CVH.vehicles.placeCar(car, 78, -10, 0);
+      car.vel.set(0, 0, 15);
+      car.speed = 15;
+      pl.forceEnter(car);
+      CVH.police.heat = 380; // four stars
+      CVH.police.stars = 4;
+      const mk = (x, z, h) => {
+        const c = CVH.vehicles.makeCar(scene, 'police', 0xf0f0ee);
+        CVH.vehicles.placeCar(c, x, z, h);
+        c.driver = 'police';
+        CVH.police.cars.push(c);
+        return c;
+      };
+      mk(73.5, -25, 0.15);   // pursuers behind
+      mk(84, -32, -0.1);
+      mk(74.3, 23, 0.85);    // roadblock ahead, angled across the avenue
+      mk(82.8, 26, -0.8);
+      CVH.missions.debugSetObjective('SHAKE THE HEAT', null, null, null);
+      pl.camYaw = 0;
+      pl.camPitch = 0.3;
+      pl.camDist = 8.6;
     } else if (name === 'mission') {
-      // Hot Lunch, second leg: taxi homing in on the HOTEL SOL pillar with
-      // the clock running down on the banner.
-      const def = CVH.missions.JOBS[1];
-      CVH.missions.jobIndex = 1;
-      CVH.missions.active = { def, steps: def.steps(), stepIdx: 1, timeLeft: 72, targetCar: null, cpIdx: 0 };
-      const car = CVH.vehicles.create(M.scene, 'taxi', W.roadX(3) - 2, W.roadZ(3) + 16, Math.PI, 0);
-      car.driver = 'player';
-      car.speed = 17;
-      M.cars.push(car);
-      M.playerCar = car;
-      P.h.group.visible = false;
-      this._light('morning', car.group.position);
-      this._cam(car.group.position, Math.PI, 0.3, 10.5);
+      W.phase = 0.24;
+      W.applyTimeOfDay(scene);
+      pl.reset(114, 4, 2.28);
+      // The timed job's banner: gold pillar at the Hotel Sol entrance,
+      // 55 m away, 1:12 on the clock.
+      CVH.missions.debugSetObjective('Deliver the package to Hotel Sol', 156, -32, 72);
+      const c1 = CVH.vehicles.makeCar(scene, 'sedan', 0x57b06a);
+      CVH.vehicles.placeCar(c1, 133.2, -44, Math.PI);
+      c1.driver = 'traffic';
+      pl.camYaw = 2.28;
+      pl.camPitch = 0.3;
+      pl.camDist = 6.2;
     }
-    // Position the objective pillar for the posed mission state.
-    CVH.missions.update(0);
-    CVH.hud.frame();
-  },
+    W.sunFollow(CVH.player.mesh.position);
+  }
 };

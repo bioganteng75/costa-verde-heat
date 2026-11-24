@@ -1,172 +1,264 @@
-// hud.js — everything drawn over the 3D view: cash/health/weapon panel,
-// wanted stars, bust meter, objective banner, speedometer, toasts, the live
-// 2D minimap, and the full-screen menus (start, pause, busted/wasted, and
-// the story ending). Buttons call straight into CVH.main.
+'use strict';
+// Costa Verde Heat 3D — all DOM: HUD (cash, health, stars, weapon, bust
+// meter, objective banner, speedometer, toasts, live minimap), the start /
+// pause / busted / wasted / ending screens, and the prompt line.
+//
+// The pause menu's SOUND label has exactly one writer — syncMuteLabel() —
+// and both the menu button and the M key end up calling it (main.js routes
+// the M key through audio.toggleMute() + hud.syncMuteLabel()), so the label
+// can never drift from the real mute state.
+
 CVH.hud = {
   el: {},
+  cb: {},
+  _cashShown: null,
+  _objShown: '',
+  _promptShown: null,
+  _mapT: 0,
 
-  init() {
-    const $ = (id) => document.getElementById(id);
-    this.el = {
-      hud: $('hud'), cash: $('cash'), healthFill: $('healthFill'), weapon: $('weapon'),
-      stars: $('stars'), bustWrap: $('bustWrap'), bustFill: $('bustFill'),
-      banner: $('banner'), bannerLabel: $('bannerLabel'), bannerMeta: $('bannerMeta'),
-      speedo: $('speedo'), speedVal: $('speedVal'), speedCar: $('speedCar'), integrityFill: $('integrityFill'),
-      toasts: $('toasts'), minimap: $('minimap'), damage: $('damage'),
-      menu: $('menu'), btnNew: $('btnNew'), btnContinue: $('btnContinue'), menuNote: $('menuNote'),
-      pauseMenu: $('pauseMenu'), btnResume: $('btnResume'), btnSave: $('btnSave'),
-      btnRestart: $('btnRestart'), btnSound: $('btnSound'), muteState: $('muteState'),
-      endScreen: $('endScreen'), endTitle: $('endTitle'), endText: $('endText'), btnRespawn: $('btnRespawn'),
-      endingScreen: $('endingScreen'), endingStats: $('endingStats'),
-      btnRoam: $('btnRoam'), btnNewGame2: $('btnNewGame2'),
+  init: function (callbacks) {
+    this.cb = callbacks || {};
+    const ids = ['hud', 'hud-cash', 'hud-weapon', 'healthfill', 'hud-stars', 'bustwrap', 'bustfill',
+      'objective', 'obj-title', 'obj-sub', 'speedo', 'speed-val', 'speed-car', 'prompt', 'toasts',
+      'minimap', 'menu-main', 'menu-pause', 'screen-busted', 'screen-wasted', 'screen-ending',
+      'btn-continue', 'busted-text', 'wasted-text', 'ending-stats', 'btn-sound'];
+    for (let i = 0; i < ids.length; i++) this.el[ids[i]] = document.getElementById(ids[i]);
+    const on = (id, fn) => {
+      const n = document.getElementById(id);
+      if (n) n.addEventListener('click', () => { CVH.audio.init(); CVH.audio.ui(); if (fn) fn(); });
     };
-    const M = CVH.main;
-    this.el.btnNew.addEventListener('click', () => { CVH.audio.ensure(); CVH.audio.click(); M.newGame(); });
-    this.el.btnContinue.addEventListener('click', () => { CVH.audio.ensure(); CVH.audio.click(); M.continueGame(); });
-    this.el.btnResume.addEventListener('click', () => { CVH.audio.click(); M.resume(); });
-    this.el.btnSave.addEventListener('click', () => { CVH.audio.click(); M.saveGame(); this.toast('Saved', 'Progress tucked away safely.', 1400); });
-    this.el.btnRestart.addEventListener('click', () => { CVH.audio.click(); M.restartStory(); });
-    this.el.btnSound.addEventListener('click', () => { M.toggleMute(); });
-    this.el.btnRespawn.addEventListener('click', () => { CVH.audio.click(); M.respawn(); });
-    this.el.btnRoam.addEventListener('click', () => { CVH.audio.click(); M.closeEnding(); });
-    this.el.btnNewGame2.addEventListener('click', () => { CVH.audio.click(); M.newGame(); });
-    this._mm = this.el.minimap.getContext('2d');
+    on('btn-new', () => this.cb.onNew && this.cb.onNew());
+    on('btn-continue', () => this.cb.onContinue && this.cb.onContinue());
+    on('btn-resume', () => this.cb.onResume && this.cb.onResume());
+    on('btn-save', () => this.cb.onSave && this.cb.onSave());
+    on('btn-restart', () => this.cb.onRestart && this.cb.onRestart());
+    on('btn-quit', () => this.cb.onQuit && this.cb.onQuit());
+    on('btn-busted-ok', () => this.cb.onBustedOk && this.cb.onBustedOk());
+    on('btn-wasted-ok', () => this.cb.onWastedOk && this.cb.onWastedOk());
+    on('btn-roam', () => this.cb.onRoam && this.cb.onRoam());
+    on('btn-ending-new', () => this.cb.onEndingNew && this.cb.onEndingNew());
+    const soundBtn = document.getElementById('btn-sound');
+    if (soundBtn) {
+      soundBtn.addEventListener('click', () => {
+        CVH.audio.init();
+        CVH.audio.toggleMute();
+        CVH.hud.syncMuteLabel();
+      });
+    }
     this.syncMuteLabel();
   },
 
-  // QA fix: the SOUND label is refreshed from the audio module's real state
-  // through this one function, whichever control toggled the mute.
-  syncMuteLabel() {
-    if (this.el.muteState) this.el.muteState.textContent = CVH.audio.muted ? 'OFF' : 'ON';
+  // The single place the SOUND label is written. Ever.
+  syncMuteLabel: function () {
+    const n = this.el['btn-sound'] || document.getElementById('btn-sound');
+    if (n) n.textContent = 'SOUND: ' + (CVH.audio.muted ? 'OFF' : 'ON');
   },
 
-  toast(title, body, ms) {
-    const div = document.createElement('div');
-    div.className = 'toast';
-    div.innerHTML = '<b></b><span></span>';
-    div.querySelector('b').textContent = title;
-    div.querySelector('span').textContent = body;
-    this.el.toasts.appendChild(div);
-    setTimeout(() => { div.classList.add('out'); setTimeout(() => div.remove(), 450); }, ms || 2600);
-    while (this.el.toasts.children.length > 3) this.el.toasts.firstChild.remove();
+  showMain: function (hasSave) {
+    this.hideAllMenus();
+    this.el['menu-main'].style.display = 'flex';
+    this.el['btn-continue'].style.display = hasSave ? 'block' : 'none';
+    this.el.hud.style.display = 'none';
   },
 
-  setBanner(label, meta) {
-    if (!label) { this.el.banner.style.opacity = '0'; return; }
-    this.el.banner.style.opacity = '1';
-    this.el.bannerLabel.textContent = label;
-    this.el.bannerMeta.textContent = meta || '';
+  hideAllMenus: function () {
+    for (const id of ['menu-main', 'menu-pause', 'screen-busted', 'screen-wasted', 'screen-ending']) {
+      this.el[id].style.display = 'none';
+    }
   },
 
-  flashDamage() {
-    this.el.damage.style.opacity = '0.55';
-    setTimeout(() => { this.el.damage.style.opacity = '0'; }, 90);
+  showHud: function () {
+    this.hideAllMenus();
+    this.el.hud.style.display = 'block';
   },
 
-  showMenu(hasSave) {
-    this.el.menu.style.display = 'flex';
-    this.el.btnContinue.style.display = hasSave ? 'block' : 'none';
-    this.el.menuNote.textContent = hasSave ? 'A saved run is waiting for you.' : 'No saved run yet — start a new one.';
+  showPause: function () {
+    this.syncMuteLabel();
+    this.el['menu-pause'].style.display = 'flex';
   },
-  hideMenu() { this.el.menu.style.display = 'none'; },
-  showPause() { this.el.pauseMenu.style.display = 'flex'; this.syncMuteLabel(); },
-  hidePause() { this.el.pauseMenu.style.display = 'none'; },
-  showEnd(kind, text) {
-    this.el.endTitle.textContent = kind === 'busted' ? 'BUSTED' : 'WASTED';
-    this.el.endTitle.style.color = kind === 'busted' ? '#7fb5ff' : '#ff7a6b';
-    this.el.endText.textContent = text;
-    this.el.endScreen.style.display = 'flex';
-  },
-  hideEnd() { this.el.endScreen.style.display = 'none'; },
+  hidePause: function () { this.el['menu-pause'].style.display = 'none'; },
 
-  showEnding(stats) {
-    this.el.endingStats.innerHTML =
-      '<div>Jobs completed <b>6 / 6</b></div>' +
-      '<div>Total earnings <b>' + CVH.u.fmtMoney(stats.earned) + '</b></div>' +
-      '<div>Cash in pocket <b>' + CVH.u.fmtMoney(stats.cash) + '</b></div>' +
-      '<div>Cash packages found <b>' + stats.packages + ' / ' + stats.packagesTotal + '</b></div>';
-    this.el.endingScreen.style.display = 'flex';
+  showBusted: function (text) {
+    this.el['busted-text'].textContent = text;
+    this.el['screen-busted'].style.display = 'flex';
   },
-  hideEnding() { this.el.endingScreen.style.display = 'none'; },
+  showWasted: function (text) {
+    this.el['wasted-text'].textContent = text;
+    this.el['screen-wasted'].style.display = 'flex';
+  },
+  showEnding: function (stats) {
+    this.el['ending-stats'].innerHTML =
+      'Cash earned: <b>' + CVH.fmtCash(stats.earned) + '</b><br>' +
+      'Cash packages found: <b>' + stats.packages + ' / 14</b><br>' +
+      'Story jobs complete: <b>6 / 6</b><br>' +
+      'Final balance: <b>' + CVH.fmtCash(stats.cash) + '</b>';
+    this.el['screen-ending'].style.display = 'flex';
+  },
 
-  // Per-frame refresh of the small stuff.
-  frame(state) {
-    const M = CVH.main;
-    this.el.cash.textContent = CVH.u.fmtMoney(M.cash);
-    this.el.healthFill.style.width = CVH.u.clamp(CVH.player.health, 0, 100) + '%';
-    this.el.healthFill.style.background = CVH.player.health < 30 ? '#e03c31' : '#57c256';
-    this.el.weapon.textContent = { fists: 'FISTS', pistol: 'PISTOL', smg: 'SMG' }[CVH.player.weapon];
-    const st = CVH.police.stars;
-    this.el.stars.textContent = '★★★★★'.slice(0, st) + '☆☆☆☆☆'.slice(0, 5 - st);
-    this.el.stars.style.opacity = st > 0 ? '1' : '0.25';
-    const bust = CVH.police.bust;
-    this.el.bustWrap.style.opacity = bust > 0.02 ? '1' : '0';
-    this.el.bustFill.style.width = (bust * 100) + '%';
-    const obj = CVH.missions.objective();
-    if (obj) {
-      let meta = '';
-      if (obj.x !== null && obj.x !== undefined) {
-        const f = M.playerCar ? M.playerCar.group.position : CVH.player.pos;
-        meta = Math.round(CVH.u.dist2(f.x, f.z, obj.x, obj.z)) + ' m';
+  toast: function (msg, ms) {
+    const box = this.el.toasts;
+    if (!box) return;
+    while (box.children.length >= 4) box.removeChild(box.firstChild);
+    const d = document.createElement('div');
+    d.className = 'toast';
+    d.textContent = msg;
+    box.appendChild(d);
+    setTimeout(() => { if (d.parentNode) d.parentNode.removeChild(d); }, ms || 3200);
+  },
+
+  setPrompt: function (text) {
+    if (text === this._promptShown) return;
+    this._promptShown = text;
+    const n = this.el.prompt;
+    if (!n) return;
+    if (text) { n.textContent = text; n.style.display = 'block'; }
+    else n.style.display = 'none';
+  },
+
+  update: function (dt) {
+    const pl = CVH.player;
+    if (!pl || !pl.mesh) return;
+    // Cash.
+    const cash = CVH.game ? CVH.game.cash : 0;
+    if (cash !== this._cashShown) {
+      this._cashShown = cash;
+      this.el['hud-cash'].textContent = CVH.fmtCash(cash);
+    }
+    // Health.
+    this.el.healthfill.style.width = CVH.clamp(pl.health, 0, 100) + '%';
+    this.el.healthfill.style.background = pl.health < 30 ? '#e0483a' : '#57c84a';
+    // Weapon.
+    const wname = pl.inCar ? 'DRIVING' : (pl.weapon === 'fist' ? 'FISTS' : pl.weapon.toUpperCase());
+    if (this._weaponShown !== wname) {
+      this._weaponShown = wname;
+      this.el['hud-weapon'].textContent = wname;
+    }
+    // Wanted stars.
+    const stars = CVH.police ? CVH.police.stars : 0;
+    if (this._starsShown !== stars) {
+      this._starsShown = stars;
+      let s = '';
+      for (let i = 0; i < 5; i++) s += i < stars ? '★' : '☆';
+      this.el['hud-stars'].textContent = s;
+      this.el['hud-stars'].style.color = stars > 0 ? '#ffc93c' : 'rgba(255,255,255,0.35)';
+    }
+    // Bust meter.
+    const bust = CVH.police ? CVH.police.bust : 0;
+    this.el.bustwrap.style.display = bust > 0.02 ? 'block' : 'none';
+    this.el.bustfill.style.width = Math.round(bust * 100) + '%';
+    // Objective banner.
+    const obj = CVH.missions ? CVH.missions.currentObjective() : null;
+    if (!obj) {
+      if (this._objShown !== '') { this._objShown = ''; this.el.objective.style.display = 'none'; }
+    } else {
+      let sub = '';
+      const ppos = pl.mesh.position;
+      if (typeof obj.x === 'number') {
+        sub = Math.round(CVH.dist2d(ppos.x, ppos.z, obj.x, obj.z)) + ' m';
       }
-      if (obj.timer > 0) meta += (meta ? ' · ' : '') + CVH.u.fmtTime(obj.timer);
-      this.setBanner(obj.label, meta);
-    } else {
-      this.setBanner(M.storyDoneCache ? 'Free roam — Costa Verde is yours.' : null);
+      if (typeof obj.timer === 'number' && obj.timer !== null) {
+        sub += (sub ? '  ·  ' : '') + CVH.fmtTime(obj.timer);
+      }
+      if (typeof obj.heat === 'number') {
+        sub += (sub ? '  ·  ' : '') + 'heat ' + Math.round(obj.heat / 100 * 10) / 10 + ' ★';
+      }
+      const key = obj.label + '|' + sub;
+      if (key !== this._objShown) {
+        this._objShown = key;
+        this.el.objective.style.display = 'block';
+        this.el['obj-title'].textContent = obj.label;
+        this.el['obj-sub'].textContent = sub;
+      }
     }
-    if (M.playerCar) {
-      this.el.speedo.style.opacity = '1';
-      this.el.speedVal.textContent = Math.round(Math.abs(M.playerCar.speed) * 3.6);
-      this.el.speedCar.textContent = M.playerCar.type.toUpperCase();
-      this.el.integrityFill.style.width = M.playerCar.health + '%';
+    // Speedometer.
+    if (pl.inCar) {
+      this.el.speedo.style.display = 'block';
+      this.el['speed-val'].textContent = Math.round(pl.inCar.speed * 3.6) + '';
+      this.el['speed-car'].textContent = 'INTEGRITY ' + Math.max(0, Math.round(pl.inCar.health)) + '%';
+      this.el['speed-car'].style.color = pl.inCar.health < 30 ? '#e0483a' : '#cfd6da';
     } else {
-      this.el.speedo.style.opacity = '0';
+      this.el.speedo.style.display = 'none';
     }
-    this._drawMinimap();
+    // Minimap.
+    this._mapT -= dt;
+    if (this._mapT <= 0) {
+      this._mapT = 0.12;
+      this._drawMinimap();
+    }
   },
 
-  _drawMinimap() {
-    const g = this._mm;
-    const W = CVH.world;
-    const cw = 190, ch = 150;
-    const sx = cw / (W.X1 - W.X0), sz = ch / (W.Z1 - W.Z0);
-    const X = (x) => (x - W.X0) * sx, Z = (z) => (z - W.Z0) * sz;
-    g.fillStyle = '#274b63';
-    g.fillRect(0, 0, cw, ch);
-    g.fillStyle = '#8fa36b';
-    g.fillRect(0, 0, X(W.WATER_X), ch);
-    g.fillStyle = '#e6d6a4';
-    g.fillRect(X(224), 0, X(W.WATER_X) - X(224), ch);
-    g.strokeStyle = 'rgba(30,32,36,0.8)';
-    g.lineWidth = 2.4;
-    for (let i = 0; i <= W.COLS; i++) { g.beginPath(); g.moveTo(X(W.roadX(i)), 0); g.lineTo(X(W.roadX(i)), ch); g.stroke(); }
-    for (let j = 0; j <= W.ROWS; j++) { g.beginPath(); g.moveTo(0, Z(W.roadZ(j))); g.lineTo(X(W.WATER_X), Z(W.roadZ(j))); g.stroke(); }
-    // Objective.
-    const obj = CVH.missions.objective();
-    if (obj && obj.x !== null && obj.x !== undefined) {
-      g.fillStyle = '#ffc93e';
-      g.beginPath(); g.arc(X(obj.x), Z(obj.z), 4, 0, 7); g.fill();
-      g.strokeStyle = 'rgba(255,201,62,0.6)';
-      g.beginPath(); g.arc(X(obj.x), Z(obj.z), 6.5 + Math.sin(performance.now() / 240) * 1.6, 0, 7); g.stroke();
+  _drawMinimap: function () {
+    const cv = this.el.minimap;
+    if (!cv) return;
+    const g = cv.getContext('2d');
+    const S = cv.width, C = S / 2, scale = 0.55;
+    const pl = CVH.player;
+    const ppos = pl.mesh.position;
+    g.fillStyle = '#141e28';
+    g.fillRect(0, 0, S, S);
+    const toMap = (wx, wz) => [C + (wx - ppos.x) * scale, C + (wz - ppos.z) * scale];
+    // Water + beach to the east.
+    g.fillStyle = '#274b6e';
+    let wp = toMap(252, 0);
+    g.fillRect(wp[0], 0, S - wp[0], S);
+    g.fillStyle = '#d9c491';
+    wp = toMap(204, 0);
+    g.fillRect(wp[0], 0, Math.max(0, toMap(252, 0)[0] - wp[0]), S);
+    // Roads.
+    g.strokeStyle = '#4a545e';
+    g.lineWidth = 5;
+    for (let i = 0; i < 8; i++) {
+      const x = toMap(CVH.world.roadX(i), 0)[0];
+      if (x < -6 || x > S + 6) continue;
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, S); g.stroke();
+    }
+    for (let j = 0; j < 6; j++) {
+      const y = toMap(0, CVH.world.roadZ(j))[1];
+      if (y < -6 || y > S + 6) continue;
+      g.beginPath(); g.moveTo(0, y); g.lineTo(S, y); g.stroke();
+    }
+    // Cash packages.
+    g.fillStyle = '#3aff70';
+    for (let i = 0; i < CVH.world.packages.length; i++) {
+      const pk = CVH.world.packages[i];
+      if (pk.taken) continue;
+      const p = toMap(pk.x, pk.z);
+      if (p[0] < 0 || p[0] > S || p[1] < 0 || p[1] > S) continue;
+      g.fillRect(p[0] - 2, p[1] - 2, 4, 4);
     }
     // Police blips.
-    g.fillStyle = '#ff4d4d';
-    for (const c of CVH.police.cars) {
-      if (c.dead) continue;
-      const p = c.group.position;
-      g.fillRect(X(p.x) - 2, Z(p.z) - 2, 4, 4);
+    g.fillStyle = '#ff4030';
+    for (let i = 0; i < CVH.police.cars.length; i++) {
+      const cp = CVH.police.cars[i].mesh.position;
+      const p = toMap(cp.x, cp.z);
+      g.beginPath();
+      g.arc(CVH.clamp(p[0], 5, S - 5), CVH.clamp(p[1], 5, S - 5), 3.4, 0, CVH.TAU);
+      g.fill();
     }
-    // Player arrow (or the car they're driving).
-    const M = CVH.main;
-    const f = M.playerCar ? M.playerCar.group.position : CVH.player.pos;
-    const hd = M.playerCar ? M.playerCar.heading : CVH.player.heading;
+    // Objective.
+    const obj = CVH.missions ? CVH.missions.currentObjective() : null;
+    if (obj && typeof obj.x === 'number') {
+      const p = toMap(obj.x, obj.z);
+      const cx = CVH.clamp(p[0], 7, S - 7), cy = CVH.clamp(p[1], 7, S - 7);
+      g.fillStyle = '#ffc93c';
+      g.beginPath(); g.arc(cx, cy, 5, 0, CVH.TAU); g.fill();
+      g.strokeStyle = '#fff2c0'; g.lineWidth = 1.6;
+      g.beginPath(); g.arc(cx, cy, 7.5, 0, CVH.TAU); g.stroke();
+    }
+    // Player arrow, pointing where the camera faces.
+    const f = pl._fwd || { x: 0, z: -1 };
+    const a = Math.atan2(f.x, -f.z);
     g.save();
-    g.translate(X(f.x), Z(f.z));
-    g.rotate(Math.PI - hd);
+    g.translate(C, C);
+    g.rotate(a);
     g.fillStyle = '#ffffff';
     g.beginPath();
-    g.moveTo(0, -5.5); g.lineTo(3.8, 4.4); g.lineTo(0, 2.4); g.lineTo(-3.8, 4.4);
+    g.moveTo(0, -8); g.lineTo(5.4, 6); g.lineTo(0, 3); g.lineTo(-5.4, 6);
     g.closePath(); g.fill();
     g.restore();
-  },
+    // Frame.
+    g.strokeStyle = 'rgba(255,255,255,0.25)';
+    g.lineWidth = 2;
+    g.strokeRect(1, 1, S - 2, S - 2);
+  }
 };

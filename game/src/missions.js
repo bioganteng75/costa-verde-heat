@@ -1,344 +1,415 @@
-// missions.js — Marisol Vega's six-job story chain, taxi fares, and the gold
-// objective pillar. One cancel() routine (QA fix) is the single cleanup path
-// every reset flows through, so a job can never leak a target car or leave a
-// taxi passenger invisible.
+'use strict';
+// Costa Verde Heat 3D — Marisol Vega's six-job story chain, taxi fares, and
+// the gold objective pillar.
+//
+// EVERY objective coordinate in this file was audited against the world
+// build: each sits inside the world bounds, on land the player can stand or
+// drive on (road, sidewalk ring, parking lot, park, beach sand or the pier
+// deck), clear of every building footprint. Job 1's beach delivery is on
+// the sand strip at (222, 40): 30 m short of the waterline (x = 252) and
+// 24 m inside the world bound (x = 246), so its whole completion circle is
+// reachable — an earlier build stranded it past the shoreline.
+//
+// One cleanup path — cancel() — serves new game, restart story, busted and
+// wasted alike: it removes a still-parked mission target car, puts a taxi
+// passenger back on the pavement, and clears all job/taxi state.
+
 CVH.missions = {
-  jobIndex: 0,
-  active: null,       // { def, stepIdx, timeLeft, targetCar, cpIdx }
-  taxi: null,         // { ped, phase: 'board'|'ride', dest:{x,z}, timeLeft, fareBase }
-  storyDone: false,
-  stats: { earned: 0, jobsDone: 0 },
-  _pillar: null,
-  _flagT: 6,
+  jobIndex: 0,       // next story job to offer, 0..5; 6 = story complete
+  active: null,      // { def, stageIdx, stage, timer, targetCar }
+  taxi: null,        // { phase, point, dest, fare, tipT, ped }
+  taxiCd: 4,
+  marker: null,
+  markerCore: null,
+  _passenger: null,
+  _fakeObjective: null,
+
+  PORCH: { x: -144, z: 116 }, // Marisol's safehouse porch: jobs start here
+
+  // Audited taxi pickup/dropoff points: roads, landmark fronts, lots, parks,
+  // the beach promenade. All reachable, all on land.
+  TAXI_POINTS: [
+    { x: -156, z: 130 }, { x: -104, z: 20 }, { x: -104, z: -84 },
+    { x: 0, z: 19 }, { x: 156, z: 66 }, { x: 222, z: 40 },
+    { x: 104, z: -52 }, { x: -52, z: -52 }, { x: 52, z: 78 },
+    { x: 182, z: -26 }, { x: -52, z: 52 }, { x: 104, z: 52 }
+  ],
 
   JOBS: [
     {
-      title: 'First Run',
-      intro: 'Marisol: "A package is waiting at the marina pier. Bring it to Cafe Marina — and smile for the cameras."',
-      reward: 150,
-      steps: () => [
-        { kind: 'goto', label: 'Pick up the package at the marina', x: CVH.world.WATER_X + 8, z: 78 },
-        { kind: 'goto', label: 'Deliver to Cafe Marina', x: CVH.world.roadX(5), z: CVH.world.roadZ(0) + 10 },
-      ],
-    },
-    {
-      title: 'Hot Lunch',
-      intro: 'Marisol: "The hotel kitchen ordered lunch across town. It is in the taxi-rank cooler. Ninety-five seconds — go!"',
-      reward: 220,
-      time: 95,
-      steps: () => [
-        { kind: 'goto', label: 'Collect the lunch at Cafe Marina', x: CVH.world.roadX(5), z: CVH.world.roadZ(0) + 10 },
-        { kind: 'goto', label: 'Deliver to HOTEL SOL — fast!', x: CVH.world.roadX(3), z: CVH.world.roadZ(2) + 12 },
-      ],
-    },
-    {
-      title: 'Triple Drop',
-      intro: 'Marisol: "Three envelopes, three corners of Costa Verde. No questions, no stops."',
+      name: 'First Run',
+      intro: 'Marisol: "A package is waiting behind Hotel Sol. Bring it to my friend on the beach — and smile for the cameras."',
       reward: 300,
-      steps: () => [
-        { kind: 'goto', label: 'Drop 1: the hospital steps', x: CVH.world.hospital.x, z: CVH.world.hospital.z },
-        { kind: 'goto', label: 'Drop 2: the north promenade', x: 226, z: CVH.world.roadZ(0) },
-        { kind: 'goto', label: 'Drop 3: BANCO VERDE', x: CVH.world.roadX(4), z: CVH.world.roadZ(2) + 12 },
-      ],
+      stages: [
+        { k: 'goto', x: 137, z: -52, r: 3.6, label: 'Pick up the package behind Hotel Sol' },
+        { k: 'goto', x: 222, z: 40, r: 3.6, label: 'Deliver the package to the beach' }
+      ]
     },
     {
-      title: 'Coupe de Ville',
-      intro: 'Marisol: "A red coupe is parked by the north-east lot. Its owner owes me. Bring it home — gently."',
-      reward: 380,
-      steps: () => [
-        { kind: 'steal', label: 'Steal the red coupe', x: CVH.world.roadX(7) - 4, z: CVH.world.roadZ(0) + 4 },
-        { kind: 'deliverCar', label: 'Bring the coupe to the safehouse', x: CVH.world.safehouse.x, z: CVH.world.safehouse.z },
-      ],
+      name: 'Ninety-Five Seconds',
+      intro: 'Marisol: "Cafe Marina has something perishable. The bank manager hates waiting. Ninety-five seconds, no excuses."',
+      reward: 450,
+      stages: [
+        { k: 'goto', x: 156, z: 66, r: 3.6, label: 'Pick up at Cafe Marina' },
+        { k: 'goto', x: 0, z: 19, r: 3.6, label: 'Deliver to Banco Verde', timer: 95 }
+      ]
     },
     {
-      title: 'Marina Alarm',
-      intro: 'Marisol: "The marina safe is rigged. The second you grab the case, every badge in town wakes up. Lose them AFTER the drop."',
-      reward: 460,
-      steps: () => [
-        { kind: 'goto', label: 'Grab the case at the marina', x: CVH.world.WATER_X + 8, z: 78, alarm: true },
-        { kind: 'goto', label: 'Drop the case at BANCO VERDE', x: CVH.world.roadX(4), z: CVH.world.roadZ(2) + 12 },
-      ],
+      name: 'Three Drops',
+      intro: 'Marisol: "Three envelopes, three friends: the park, the east lot, then the station steps. Quiet and quick."',
+      reward: 600,
+      stages: [
+        { k: 'goto', x: -52, z: 52, r: 3.6, label: 'Drop 1 of 3 — the park' },
+        { k: 'goto', x: 104, z: 52, r: 3.6, label: 'Drop 2 of 3 — the east lot' },
+        { k: 'goto', x: -104, z: 20, r: 3.6, label: 'Drop 3 of 3 — the station steps' }
+      ]
     },
     {
-      title: 'Verde Sunset',
-      intro: 'Marisol: "One last run, kid. The vault money moves tonight — hit every checkpoint, shake the heat, and come home rich."',
-      reward: 800,
-      steps: () => [
-        { kind: 'checkpoints', label: 'Hit every checkpoint!', points: null },
-        { kind: 'shake', label: 'Shake the heat' },
-        { kind: 'goto', label: 'Come home to the safehouse', x: CVH.world.safehouse.x, z: CVH.world.safehouse.z },
-      ],
+      name: 'The Magenta Coupe',
+      intro: 'Marisol: "A magenta coupe is parked in the north lot. It belongs to a man who owes me. Bring it to Pay \'n Spray — gently."',
+      reward: 700,
+      stages: [
+        { k: 'gotoCar', x: 0, z: -104, r: 4.2, label: 'Find the magenta coupe in the north lot', carX: 0, carZ: -104 },
+        { k: 'enterCar', label: 'Get in the coupe' },
+        { k: 'deliverCar', x: 52, z: 104, r: 5.5, label: 'Deliver the coupe to Pay \'n Spray' }
+      ]
     },
+    {
+      name: 'Marina Alarm',
+      intro: 'Marisol: "Pick up the case at the end of the pier. Fair warning — the marina alarm is... sensitive."',
+      reward: 1000,
+      stages: [
+        { k: 'goto', x: 246, z: -26, r: 3.6, label: 'Pick up the case on the pier', alarm: true },
+        { k: 'goto', x: -156, z: 122, r: 4, label: 'Bring it back to the safehouse' }
+      ]
+    },
+    {
+      name: 'King of Costa Verde',
+      intro: 'Marisol: "Last one, and it is not quiet. Hit the checkpoint on the coast road, lose the heat, then come home."',
+      reward: 1500,
+      stages: [
+        { k: 'goto', x: 182, z: 78, r: 4.5, label: 'Hit the checkpoint on the coast road', heat: 420 },
+        { k: 'escape', label: 'Lose the heat' },
+        { k: 'goto', x: -156, z: 122, r: 4, label: 'Get back to the safehouse' }
+      ]
+    }
   ],
 
-  init(scene) {
-    const geo = new THREE.CylinderGeometry(1.6, 2.1, 30, 14, 1, true);
-    const mat = new THREE.MeshBasicMaterial({ color: 0xffc93e, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
-    this._pillar = new THREE.Mesh(geo, mat);
-    this._pillar.position.y = 15;
-    scene.add(this._pillar);
-    const core = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 30, 8),
-      new THREE.MeshBasicMaterial({ color: 0xffe98a, transparent: true, opacity: 0.75, blending: THREE.AdditiveBlending, depthWrite: false }));
-    core.position.y = 0;
-    this._pillar.add(core);
+  init: function (scene) {
+    const geo = new THREE.CylinderGeometry(1.15, 1.15, 34, 14, 1, true);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffc93c, transparent: true, opacity: 0.3,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false
+    });
+    this.marker = new THREE.Mesh(geo, mat);
+    this.marker.position.y = 17;
+    const coreGeo = new THREE.CylinderGeometry(0.4, 0.4, 34, 8, 1, true);
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xffe9a3, transparent: true, opacity: 0.55,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false
+    });
+    this.markerCore = new THREE.Mesh(coreGeo, coreMat);
+    this.markerCore.position.y = 17;
+    this.marker.add(this.markerCore);
+    scene.add(this.marker);
+    this._passenger = CVH.player.buildHumanoid({ skin: 0xe8b088, shirt: 0xf0ead8, pants: 0x3a4a5a, hair: 0xd8c9a8 });
+    this._passenger.group.visible = false;
+    scene.add(this._passenger.group);
   },
 
-  startJob() {
-    const def = this.JOBS[this.jobIndex];
-    if (!def) return;
-    const steps = def.steps();
-    this.active = { def, steps, stepIdx: 0, timeLeft: def.time || 0, targetCar: null, cpIdx: 0 };
-    // The finale's checkpoints are laid across the whole city.
-    const last = steps[0];
-    if (last.kind === 'checkpoints') {
-      const W = CVH.world;
-      last.points = [
-        { x: W.roadX(7), z: W.roadZ(0) }, { x: W.roadX(1), z: W.roadZ(5) },
-        { x: 224, z: W.roadZ(3) }, { x: W.roadX(4), z: W.roadZ(1) },
-      ];
-      CVH.police.heat = Math.max(CVH.police.heat, 380);
-      CVH.police._recalc();
-    }
-    // The steal job parks its coupe at the step location.
-    const steal = steps.find((s) => s.kind === 'steal');
-    if (steal) {
-      const car = CVH.vehicles.create(CVH.main.scene, 'sport', steal.x, steal.z, Math.PI / 2, 0);
-      car.driver = 'parked';
-      CVH.main.cars.push(car);
-      this.active.targetCar = car;
-    }
-    CVH.hud.toast(def.title, def.intro, 5200);
-    CVH.audio.click();
-  },
-
-  // QA fix: THE cleanup path. Every reset (new game, restart story, busted,
-  // wasted) calls this and only this, so nothing a job spawned can leak:
-  // a still-parked target car is removed from the world (re-starting the
-  // steal job can never stack duplicate coupes) and a taxi passenger who
-  // was hidden inside the player's car becomes visible again.
-  cancel() {
+  // ---- the one cleanup path -----------------------------------------------------
+  cancel: function () {
     if (this.active && this.active.targetCar) {
       const car = this.active.targetCar;
-      if (car.driver === 'parked') {
-        const i = CVH.main.cars.indexOf(car);
-        if (i >= 0) CVH.main.cars.splice(i, 1);
-        CVH.main.scene.remove(car.group);
-      }
+      const playerInIt = CVH.player.inCar === car;
+      if (!playerInIt) CVH.vehicles.removeCar(car);
+      this.active.targetCar = null;
     }
     this.active = null;
-    if (this.taxi) {
-      const ped = this.taxi.ped;
-      if (ped.state === 'riding') {
-        ped.state = 'walk';
-        ped.h.group.visible = true;
-        const p = CVH.player.pos;
-        ped.h.group.position.set(p.x + 1.5, 0, p.z + 1.5);
-        ped.h.group.rotation.x = 0;
+    if (this.taxi && this._passenger) {
+      if (this.taxi.phase === 'ride') {
+        // The passenger climbs back out wherever the car stopped — never
+        // leave them invisible inside a car that no longer has a fare.
+        const cp = CVH.player.inCar ? CVH.player.inCar.mesh.position : CVH.player.mesh.position;
+        this._passenger.group.position.set(cp.x + 2, 0, cp.z);
+        this._passenger.group.visible = true;
+      } else {
+        // Still waiting at the kerb: the fare is gone, so are they.
+        this._passenger.group.visible = false;
       }
       this.taxi = null;
     }
+    this.taxiCd = 4;
   },
 
-  _failJob(reason) {
-    CVH.hud.toast('Job failed', reason + ' Head back to Marisol to try again.', 4200);
-    CVH.audio.jobFail();
-    this.cancel();
+  onPlayerExitCar: function (car) {
+    if (this.taxi && this.taxi.phase === 'ride') {
+      const cp = car.mesh.position;
+      this._passenger.group.position.set(cp.x + 2.2, 0, cp.z);
+      this._passenger.group.visible = true;
+      this.taxi = null;
+      this.taxiCd = 6;
+      CVH.hud.toast('Fare cancelled — the passenger got out.');
+    }
   },
 
-  _completeJob() {
+  startJob: function (idx, scene) {
+    const def = this.JOBS[idx];
+    if (!def) return;
+    this.active = {
+      def: def, jobIdx: idx, stageIdx: 0,
+      stage: def.stages[0], timer: null, targetCar: null
+    };
+    this._enterStage(scene);
+    CVH.hud.toast(def.intro, 5200);
+    CVH.audio.ui();
+  },
+
+  _enterStage: function (scene) {
+    const a = this.active;
+    if (!a) return;
+    const st = a.stage;
+    a.timer = (typeof st.timer === 'number') ? st.timer : null;
+    if (st.k === 'gotoCar' && scene) {
+      const car = CVH.vehicles.makeCar(scene, 'sport', 0xd83ad8);
+      CVH.vehicles.placeCar(car, st.carX, st.carZ, -Math.PI / 2);
+      car.driver = null;
+      a.targetCar = car;
+    }
+    // Stage `heat` and `alarm` flags fire when the stage is COMPLETED
+    // (see _completeStage): the checkpoint trips its alarm as you cross it,
+    // not when Marisol first mentions it.
+  },
+
+  _completeStage: function (scene) {
+    const a = this.active;
+    const st = a.stage;
+    if (st.heat) {
+      CVH.police.heat = Math.max(CVH.police.heat, st.heat);
+      CVH.hud.toast('The checkpoint trips every alarm in the city!');
+    }
+    if (st.alarm) {
+      CVH.police.heat = Math.max(CVH.police.heat, 300);
+      CVH.audio.alarm();
+      CVH.hud.toast('MARINA ALARM — the whole pier just lit up. MOVE!');
+    }
+    a.stageIdx++;
+    if (a.stageIdx >= a.def.stages.length) {
+      this._completeJob();
+      return;
+    }
+    a.stage = a.def.stages[a.stageIdx];
+    this._enterStage(scene);
+    CVH.audio.pickup();
+  },
+
+  _completeJob: function () {
     const a = this.active;
     let reward = a.def.reward;
-    let note = '';
     if (a.targetCar) {
-      if (a.targetCar.health >= 55) { reward += 120; note = ' Gentle driving bonus +$120.'; }
-      a.targetCar = null; // the coupe is Marisol's now; it stays in the world as a normal car
+      // The coupe job pays a care bonus for an undamaged delivery.
+      reward += Math.round(300 * CVH.clamp(a.targetCar.health, 0, 100) / 100);
     }
+    CVH.game.cash += reward;
+    CVH.game.earned += reward;
+    this.jobIndex = a.jobIdx + 1;
+    const wasFinale = a.jobIdx >= this.JOBS.length - 1;
     this.active = null;
-    this.jobIndex++;
-    this.stats.jobsDone++;
-    this.stats.earned += reward;
-    CVH.main.addCash(reward);
-    CVH.audio.jobDone();
-    if (this.jobIndex >= this.JOBS.length) {
-      this.storyDone = true;
-      CVH.hud.toast('Story complete', a.def.title + ' paid ' + CVH.u.fmtMoney(reward) + '.' + note, 4200);
-      CVH.main.onStoryComplete();
-    } else {
-      CVH.hud.toast(a.def.title + ' — done', 'Paid ' + CVH.u.fmtMoney(reward) + '.' + note + ' See Marisol for the next job.', 4200);
-    }
+    CVH.audio.cash();
+    CVH.hud.toast('Job done — ' + CVH.fmtCash(reward) + ' from Marisol.', 4200);
     CVH.main.saveGame();
+    if (wasFinale) CVH.main.onStoryComplete();
   },
 
-  objective() {
+  _failJob: function (scene) {
+    const idx = this.active.jobIdx;
+    CVH.hud.toast('Too slow. Marisol reschedules the job.', 3600);
+    if (this.active.targetCar && CVH.player.inCar !== this.active.targetCar) {
+      CVH.vehicles.removeCar(this.active.targetCar);
+    }
+    this.active = null;
+    this.startJob(idx, scene);
+  },
+
+  tryInteract: function (scene) {
+    if (this.active) return false;
+    if (this.jobIndex >= this.JOBS.length) return false;
+    const p = CVH.player.mesh.position;
+    if (CVH.dist2d(p.x, p.z, this.PORCH.x, this.PORCH.z) < 4) {
+      this.startJob(this.jobIndex, scene);
+      return true;
+    }
+    return false;
+  },
+
+  // What the HUD banner should show right now, or null.
+  currentObjective: function () {
+    if (this._fakeObjective) return this._fakeObjective;
     if (this.taxi) {
-      if (this.taxi.phase === 'board') {
-        const pp = this.taxi.ped.h.group.position;
-        return { x: pp.x, z: pp.z, label: 'Pick up your fare', timer: 0 };
+      if (this.taxi.phase === 'pickup') {
+        return { label: 'Pick up the fare', x: this.taxi.point.x, z: this.taxi.point.z, timer: null };
       }
-      return { x: this.taxi.dest.x, z: this.taxi.dest.z, label: 'Drop off your fare', timer: this.taxi.timeLeft };
+      return { label: 'Drop off the fare', x: this.taxi.dest.x, z: this.taxi.dest.z, timer: this.taxi.tipT };
     }
     if (this.active) {
-      const s = this.active.steps[this.active.stepIdx];
-      if (s.kind === 'checkpoints') {
-        const p = s.points[this.active.cpIdx];
-        return { x: p.x, z: p.z, label: s.label + ' (' + (this.active.cpIdx + 1) + '/' + s.points.length + ')', timer: this.active.timeLeft };
+      const st = this.active.stage;
+      if (st.k === 'escape') return { label: st.label + ' — break line of sight', x: null, z: null, timer: null, heat: CVH.police.heat };
+      if (st.k === 'enterCar') {
+        const cp = this.active.targetCar ? this.active.targetCar.mesh.position : null;
+        return { label: st.label, x: cp ? cp.x : null, z: cp ? cp.z : null, timer: null };
       }
-      if (s.kind === 'shake') return { x: null, z: null, label: 'Shake the heat — break their line of sight!', timer: 0 };
-      return { x: s.x, z: s.z, label: s.label, timer: this.active.timeLeft };
+      return { label: st.label, x: st.x, z: st.z, timer: this.active.timer };
     }
-    if (!this.storyDone && this.jobIndex < this.JOBS.length) {
-      return { x: CVH.world.safehouse.x, z: CVH.world.safehouse.z, label: 'See Marisol — job ' + (this.jobIndex + 1) + ': ' + this.JOBS[this.jobIndex].title, timer: 0 };
+    if (this.jobIndex < this.JOBS.length) {
+      return { label: 'See Marisol at the safehouse — job: ' + this.JOBS[this.jobIndex].name, x: this.PORCH.x, z: this.PORCH.z, timer: null, hint: true };
     }
     return null;
   },
 
-  update(dt) {
-    const M = CVH.main;
-    const P = CVH.player.pos;
-    const focus = M.playerCar ? M.playerCar.group.position : P;
-    // Objective pillar follows the current objective.
-    const obj = this.objective();
-    if (obj && obj.x !== null) {
-      this._pillar.visible = true;
-      this._pillar.position.x = obj.x;
-      this._pillar.position.z = obj.z;
-    } else {
-      this._pillar.visible = false;
-    }
+  // Screenshot staging: pin a fake objective (banner + pillar) in place.
+  debugSetObjective: function (label, x, z, timer) {
+    this._fakeObjective = { label: label, x: x, z: z, timer: timer };
+  },
 
-    // Marisol starts the next job when the player visits the safehouse.
-    if (!this.active && !this.storyDone && this.jobIndex < this.JOBS.length) {
-      const s = CVH.world.safehouse;
-      if (CVH.u.dist2(focus.x, focus.z, s.x, s.z) < 4.2 && !M.playerCar) this.startJob();
+  // Every positional story objective, for reachability audits.
+  debugObjectives: function () {
+    const out = [];
+    for (let j = 0; j < this.JOBS.length; j++) {
+      const def = this.JOBS[j];
+      for (let s = 0; s < def.stages.length; s++) {
+        const st = def.stages[s];
+        if (typeof st.x === 'number') {
+          out.push({ job: j + 1, stage: s, kind: st.k, x: st.x, z: st.z, label: st.label });
+        }
+      }
     }
+    return out;
+  },
 
+  update: function (dt, scene) {
+    const pl = CVH.player;
+    const ppos = pl.mesh.position;
+
+    // ---- story job ----
     if (this.active) {
       const a = this.active;
-      const s = a.steps[a.stepIdx];
-      if (a.def.time) {
-        a.timeLeft -= dt;
-        if (a.timeLeft <= 0) { this._failJob('Out of time.'); return; }
+      const st = a.stage;
+      if (a.timer !== null) {
+        a.timer -= dt;
+        if (a.timer <= 0) { this._failJob(scene); }
       }
-      const arrive = (x, z, rad) => CVH.u.dist2(focus.x, focus.z, x, z) < rad;
-      let advance = false;
-      if (s.kind === 'goto') {
-        if (arrive(s.x, s.z, 4.6)) {
-          advance = true;
-          if (s.alarm) {
-            CVH.police.heat = Math.max(CVH.police.heat, 300);
-            CVH.police._recalc();
-            CVH.hud.toast('ALARM!', 'The marina safe just woke up every badge in Costa Verde.', 3200);
+      if (this.active) { // _failJob may have restarted it; re-read
+        const cur = this.active.stage;
+        if (cur.k === 'goto' || cur.k === 'gotoCar') {
+          if (CVH.dist2d(ppos.x, ppos.z, cur.x, cur.z) < cur.r) this._completeStage(scene);
+        } else if (cur.k === 'enterCar') {
+          if (pl.inCar && pl.inCar === this.active.targetCar) this._completeStage(scene);
+        } else if (cur.k === 'deliverCar') {
+          if (pl.inCar && pl.inCar === this.active.targetCar &&
+              CVH.dist2d(ppos.x, ppos.z, cur.x, cur.z) < cur.r) {
+            this._completeStage(scene);
           }
-          CVH.audio.pickup();
+        } else if (cur.k === 'escape') {
+          if (CVH.police.heat <= 0) this._completeStage(scene);
         }
-      } else if (s.kind === 'steal') {
-        if (M.playerCar && M.playerCar === a.targetCar) advance = true;
-      } else if (s.kind === 'deliverCar') {
-        if (M.playerCar && M.playerCar === a.targetCar && arrive(s.x, s.z, 6)) advance = true;
-      } else if (s.kind === 'checkpoints') {
-        const p = s.points[a.cpIdx];
-        if (arrive(p.x, p.z, 8)) {
-          a.cpIdx++;
-          CVH.audio.cash();
-          CVH.fx.confetti(focus);
-          if (a.cpIdx >= s.points.length) advance = true;
-          else CVH.hud.toast('Checkpoint', (a.cpIdx) + ' down, ' + (s.points.length - a.cpIdx) + ' to go.', 1600);
-        }
-      } else if (s.kind === 'shake') {
-        if (CVH.police.stars === 0) advance = true;
-      }
-      if (advance) {
-        a.stepIdx++;
-        if (a.stepIdx >= a.steps.length) this._completeJob();
       }
     }
 
+    // ---- taxi fares ----
     this._updateTaxi(dt);
+
+    // ---- marker pillar follows the current objective ----
+    const obj = this.currentObjective();
+    if (obj && typeof obj.x === 'number') {
+      this.marker.visible = true;
+      this.marker.position.x = obj.x;
+      this.marker.position.z = obj.z;
+      const pulse = 0.26 + 0.1 * Math.sin(performance.now() / 280);
+      this.marker.material.opacity = pulse;
+    } else {
+      this.marker.visible = false;
+    }
   },
 
-  _updateTaxi(dt) {
-    const M = CVH.main;
-    // Occasionally flag a pedestrian as a fare while the player is driving.
-    this._flagT -= dt;
-    if (!this.taxi && this._flagT <= 0) {
-      this._flagT = 7;
-      if (M.playerCar && !this.active) {
-        const near = CVH.peds.list.find((p) => p.state === 'walk' &&
-          CVH.u.dist2(p.h.group.position.x, p.h.group.position.z, M.playerCar.group.position.x, M.playerCar.group.position.z) < 30);
-        if (near) {
-          near.state = 'flagged';
-          this.taxi = { ped: near, phase: 'wait', dest: null, timeLeft: 0, fareBase: 0 };
-          CVH.hud.toast('Taxi fare', 'A pedestrian is hailing you — pull up next to them.', 2600);
+  _updateTaxi: function (dt) {
+    const pl = CVH.player;
+    if (this.active) return; // no fares during a story job
+    if (!this.taxi) {
+      this.taxiCd -= dt;
+      if (this.taxiCd <= 0 && pl.inCar && pl.inCar.type === 'taxi' && !pl.inCar.dead) {
+        const ppos = pl.inCar.mesh.position;
+        const options = this.TAXI_POINTS.filter((pt) => {
+          const d = CVH.dist2d(pt.x, pt.z, ppos.x, ppos.z);
+          return d > 45 && d < 150;
+        });
+        if (options.length) {
+          const point = CVH.pick(options);
+          let dest = CVH.pick(this.TAXI_POINTS);
+          let guard = 0;
+          while (dest === point && guard++ < 6) dest = CVH.pick(this.TAXI_POINTS);
+          this.taxi = { phase: 'pickup', point: point, dest: dest, fare: 0, tipT: 0 };
+          this._passenger.group.position.set(point.x, 0, point.z);
+          this._passenger.group.visible = true;
+          CVH.hud.toast('A fare is waiting — check your map.');
+          CVH.audio.ui();
+        } else {
+          this.taxiCd = 5;
         }
       }
+      return;
     }
-    if (!this.taxi) return;
     const t = this.taxi;
-    const ped = t.ped;
-    const pp = ped.h.group.position;
-    if (t.phase === 'wait') {
-      if (!M.playerCar) { /* keep waiting */ }
-      else {
-        const cp = M.playerCar.group.position;
-        if (CVH.u.dist2(pp.x, pp.z, cp.x, cp.z) < 4 && Math.abs(M.playerCar.speed) < 1.5) t.phase = 'board';
-      }
-      if (ped.state !== 'flagged') this.taxi = null; // fare got knocked down etc.
-    } else if (t.phase === 'board') {
-      if (!M.playerCar) { t.phase = 'wait'; return; }
-      const cp = M.playerCar.group.position;
-      const d = CVH.u.dist2(pp.x, pp.z, cp.x, cp.z);
-      const desired = Math.atan2(cp.x - pp.x, cp.z - pp.z);
-      ped.heading = CVH.u.angleLerp(ped.heading, desired, Math.min(1, dt * 8));
-      pp.x += Math.sin(ped.heading) * 3.2 * dt;
-      pp.z += Math.cos(ped.heading) * 3.2 * dt;
-      ped.h.group.rotation.y = ped.heading;
-      CVH.animateHumanoid(ped.h, dt, 0.8, 'walk');
-      if (d < 1.6) {
-        ped.state = 'riding';
-        ped.h.group.visible = false;
-        t.phase = 'ride';
-        const W = CVH.world;
-        const dest = W.randomRoadPoint(Math.random);
-        t.dest = dest;
-        const dist = CVH.u.dist2(cp.x, cp.z, dest.x, dest.z);
-        t.fareBase = 34 + dist * 0.5;
-        t.timeLeft = dist / 7 + 45;
-        CVH.hud.toast('Fare aboard', 'They want the far side of town. Fast trip, fat tip.', 2600);
-        CVH.audio.click();
+    const carPos = pl.inCar ? pl.inCar.mesh.position : pl.mesh.position;
+    if (t.phase === 'pickup') {
+      if (!pl.inCar || pl.inCar.type !== 'taxi') { this.cancel(); return; }
+      const d = CVH.dist2d(carPos.x, carPos.z, t.point.x, t.point.z);
+      if (d < 5 && pl.inCar.speed < 1) {
+        // Passenger walks the last steps and gets in.
+        const pg = this._passenger.group;
+        const dx = carPos.x - pg.position.x, dz = carPos.z - pg.position.z;
+        const dd = Math.sqrt(dx * dx + dz * dz);
+        if (dd < 1.6) {
+          pg.visible = false;
+          t.phase = 'ride';
+          const trip = CVH.dist2d(t.point.x, t.point.z, t.dest.x, t.dest.z);
+          t.fare = Math.round(30 + trip * 0.55);
+          t.tipT = trip / 7 + 25;
+          CVH.hud.toast('Fare aboard — ' + CVH.fmtCash(t.fare) + ' to the marker. Fast = tip.');
+          CVH.audio.pickup();
+        } else {
+          pg.position.x += (dx / dd) * 2.6 * dt;
+          pg.position.z += (dz / dd) * 2.6 * dt;
+          pg.rotation.y = Math.atan2(dx, dz);
+        }
       }
     } else if (t.phase === 'ride') {
-      t.timeLeft -= dt;
-      if (!M.playerCar) {
-        // Player bailed mid-fare: passenger gets out here (visible again).
-        ped.state = 'walk';
-        ped.h.group.visible = true;
-        ped.h.group.position.set(CVH.player.pos.x + 1.5, 0, CVH.player.pos.z + 1.5);
-        this.taxi = null;
-        CVH.hud.toast('Fare lost', 'You left your passenger standing in the street.', 2200);
-        return;
-      }
-      const cp = M.playerCar.group.position;
-      if (CVH.u.dist2(cp.x, cp.z, t.dest.x, t.dest.z) < 6 && Math.abs(M.playerCar.speed) < 2) {
-        let fare = t.fareBase;
-        let tip = 0;
-        if (t.timeLeft > 12) tip = Math.round(t.fareBase * 0.45);
-        fare = Math.round(fare + tip);
-        ped.state = 'walk';
-        ped.h.group.visible = true;
-        ped.h.group.position.set(cp.x + 2, 0, cp.z + 2);
-        this.taxi = null;
-        M.addCash(fare);
-        this.stats.earned += fare;
+      t.tipT -= dt;
+      if (!pl.inCar) { this.onPlayerExitCar({ mesh: { position: carPos } }); return; }
+      const d = CVH.dist2d(carPos.x, carPos.z, t.dest.x, t.dest.z);
+      if (d < 5.5 && pl.inCar.speed < 1) {
+        const tip = Math.round(CVH.clamp(t.tipT, 0, 40));
+        CVH.game.cash += t.fare + tip;
+        CVH.game.earned += t.fare + tip;
+        const pg = this._passenger.group;
+        pg.position.set(carPos.x + 2.2, 0, carPos.z);
+        pg.visible = true;
+        CVH.hud.toast('Fare paid ' + CVH.fmtCash(t.fare + tip) + (tip > 0 ? ' (tip ' + CVH.fmtCash(tip) + ')' : '') + '.');
         CVH.audio.cash();
-        CVH.hud.toast('Fare paid', CVH.u.fmtMoney(fare) + (tip ? ' (tip ' + CVH.u.fmtMoney(tip) + ' for speed)' : '') + '.', 2600);
-      } else if (t.timeLeft <= -25) {
-        // Very late: passenger gives up at the next stop.
-        ped.state = 'walk';
-        ped.h.group.visible = true;
-        ped.h.group.position.set(cp.x + 2, 0, cp.z + 2);
         this.taxi = null;
-        CVH.hud.toast('Fare walked', 'Too slow — they got out and walked.', 2200);
+        this.taxiCd = 9;
       }
     }
   },
+
+  // Pillar + passenger visuals while the game is frozen for a screenshot.
+  updateVisuals: function () {
+    const obj = this.currentObjective();
+    if (obj && typeof obj.x === 'number') {
+      this.marker.visible = true;
+      this.marker.position.x = obj.x;
+      this.marker.position.z = obj.z;
+    } else {
+      this.marker.visible = false;
+    }
+  }
 };

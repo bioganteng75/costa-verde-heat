@@ -1,328 +1,574 @@
-// player.js — the human side of the game: a low-poly box humanoid with
-// procedural walk/run/punch/aim animation, the pedestrian crowd that uses
-// the same body, the third-person camera rig, and the player's on-foot
-// movement and hitscan combat.
-CVH.makeHumanoid = function (shirt, pants, skin) {
-  const g = new THREE.Group();
-  const mat = (c) => new THREE.MeshLambertMaterial({ color: c });
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.78, 0.34), mat(shirt));
-  torso.position.y = 1.06;
-  torso.castShadow = true;
-  g.add(torso);
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.38, 0.34), mat(skin));
-  head.position.y = 1.68;
-  head.castShadow = true;
-  g.add(head);
-  const cap = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.1, 0.38), mat(pants));
-  cap.position.y = 1.9;
-  g.add(cap);
-  function limb(x, y, w, h, d, c) {
-    const pivot = new THREE.Group();
-    pivot.position.set(x, y, 0);
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat(c));
-    m.position.y = -h / 2;
-    m.castShadow = true;
-    pivot.add(m);
-    g.add(pivot);
-    return pivot;
-  }
-  const armL = limb(-0.42, 1.38, 0.2, 0.72, 0.22, shirt);
-  const armR = limb(0.42, 1.38, 0.2, 0.72, 0.22, shirt);
-  const legL = limb(-0.17, 0.72, 0.24, 0.72, 0.26, pants);
-  const legR = limb(0.17, 0.72, 0.24, 0.72, 0.26, pants);
-  return { group: g, torso, head, armL, armR, legL, legR, phase: 0 };
-};
+'use strict';
+// Costa Verde Heat 3D — the player character and the crowd.
+//
+// Movement is CAMERA-RELATIVE and the basis is rebuilt from the real camera
+// every frame, so it can never drift from what the player sees:
+//   forward = camera direction projected onto the ground plane
+//   right   = cross(forward, up)        (facing -Z  =>  right is +X)
+//   move    = forward*(W - S) + right*(D - A)
+// W runs away from the camera, S toward it, A strafes to the camera's LEFT
+// and D to the camera's RIGHT. The same cross product gives the right vector
+// used for car exits and knockback, so the whole game agrees on "right".
+//
+// Pedestrians: 40 low-poly walkers on the sidewalk rings, recycled around
+// the player, with panic/flee behaviour and car-collision consequences.
 
-// mode: 'idle' | 'walk' | 'aim' | 'punch' — punchT/aim handled by caller pose.
-CVH.animateHumanoid = function (h, dt, speedNorm, mode, punchT) {
-  h.phase += dt * (4 + speedNorm * 7);
-  const swing = Math.sin(h.phase) * 0.62 * Math.min(1, speedNorm + 0.15);
-  if (mode === 'aim') {
-    h.armR.rotation.x = -1.45;
-    h.armL.rotation.x = -1.25;
-    h.legL.rotation.x = swing * 0.4;
-    h.legR.rotation.x = -swing * 0.4;
-  } else if (mode === 'punch') {
-    const k = punchT > 0.5 ? (1 - punchT) * 2 : punchT * 2; // out-and-back
-    h.armR.rotation.x = -1.9 * k;
-    h.armL.rotation.x = swing * 0.3;
-    h.legL.rotation.x = swing * 0.3;
-    h.legR.rotation.x = -swing * 0.3;
-  } else {
-    h.armL.rotation.x = swing;
-    h.armR.rotation.x = -swing;
-    h.legL.rotation.x = -swing;
-    h.legR.rotation.x = swing;
-  }
-  h.torso.position.y = 1.06 + Math.abs(Math.sin(h.phase)) * 0.045 * Math.min(1, speedNorm + 0.1);
-};
+CVH.peds = [];
 
-// --- pedestrians ---------------------------------------------------------------
-CVH.peds = {
-  list: [],
-  panicPos: null,
-  panicT: 0,
+CVH.player = {
+  parts: null,
+  mesh: null,
+  heading: Math.PI,
+  health: 100,
+  maxHealth: 100,
+  weapon: 'fist',
+  inCar: null,
+  vel: null,
+  walkPhase: 0,
+  punchT: 0,
+  fireCd: 0,
+  aimT: 0,
+  camYaw: Math.PI,
+  camPitch: 0.32,
+  camDist: 6.2,
+  _fwd: null,
+  _right: null,
+  _mouseIdle: 0,
 
-  spawn(scene, world, count) {
-    const r = CVH.u.rng(20240);
-    const shirts = [0xd96f4e, 0x7fb5b0, 0xe9b44c, 0xe8e0ea, 0x8fae62, 0xc96f8e, 0x4e6ed9, 0xf0ead6];
-    const pants = [0x2e3a46, 0x5c564c, 0x704214, 0x24303e];
-    const skins = [0xd9a066, 0xa0663a, 0xf0c8a0, 0x7a4a26];
-    for (let i = 0; i < count; i++) {
-      const h = CVH.makeHumanoid(CVH.u.pick(r, shirts), CVH.u.pick(r, pants), CVH.u.pick(r, skins));
-      const p = world.randomRoadPoint(r);
-      const x = p.x + (r() < 0.5 ? -1 : 1) * (world.ROAD / 2 + 1.8);
-      const z = p.z + (r() < 0.5 ? -1 : 1) * (world.ROAD / 2 + 1.8);
-      h.group.position.set(x, 0, z);
-      scene.add(h.group);
-      this.list.push({
-        h, heading: r() * Math.PI * 2, state: 'walk', tx: x, tz: z,
-        speed: CVH.u.range(r, 1.1, 1.7), health: 30, downT: 0, retargetT: r() * 4,
+  buildHumanoid: function (palette) {
+    const geo = CVH.world._unitBox || (CVH.world._unitBox = new THREE.BoxGeometry(1, 1, 1));
+    const skin = new THREE.MeshLambertMaterial({ color: palette.skin });
+    const shirt = new THREE.MeshLambertMaterial({ color: palette.shirt });
+    const pants = new THREE.MeshLambertMaterial({ color: palette.pants });
+    const hairM = new THREE.MeshLambertMaterial({ color: palette.hair });
+    const grp = new THREE.Group();
+
+    const limb = (mat, w, len, d) => {
+      const pivot = new THREE.Group();
+      const g2 = new THREE.BoxGeometry(w, len, d);
+      g2.translate(0, -len / 2, 0);
+      const m = new THREE.Mesh(g2, mat);
+      m.castShadow = true;
+      pivot.add(m);
+      return pivot;
+    };
+    const legL = limb(pants, 0.24, 0.82, 0.26); legL.position.set(-0.15, 0.86, 0); grp.add(legL);
+    const legR = limb(pants, 0.24, 0.82, 0.26); legR.position.set(0.15, 0.86, 0); grp.add(legR);
+    const armL = limb(shirt, 0.2, 0.72, 0.22); armL.position.set(-0.42, 1.44, 0); grp.add(armL);
+    const armR = limb(shirt, 0.2, 0.72, 0.22); armR.position.set(0.42, 1.44, 0); grp.add(armR);
+    const torso = new THREE.Mesh(geo, shirt);
+    torso.scale.set(0.62, 0.74, 0.34);
+    torso.position.y = 1.22;
+    torso.castShadow = true;
+    grp.add(torso);
+    const head = new THREE.Mesh(geo, skin);
+    head.scale.set(0.34, 0.36, 0.34);
+    head.position.y = 1.79;
+    head.castShadow = true;
+    grp.add(head);
+    const hair = new THREE.Mesh(geo, hairM);
+    hair.scale.set(0.37, 0.12, 0.37);
+    hair.position.y = 1.99;
+    grp.add(hair);
+    return { group: grp, legL: legL, legR: legR, armL: armL, armR: armR, torso: torso, head: head };
+  },
+
+  init: function (scene) {
+    this.vel = new THREE.Vector3();
+    this._fwd = new THREE.Vector3();
+    this._right = new THREE.Vector3();
+    this.parts = this.buildHumanoid({ skin: 0xc98a5e, shirt: 0x1f8a8a, pants: 0x2c3242, hair: 0x241a12 });
+    this.mesh = this.parts.group;
+    scene.add(this.mesh);
+    this.spawnPeds(scene);
+  },
+
+  reset: function (x, z, heading) {
+    if (this.inCar) {
+      this.inCar.driver = null;
+      this.inCar = null;
+    }
+    this.mesh.visible = true;
+    this.mesh.position.set(x, 0, z);
+    this.heading = heading;
+    this.mesh.rotation.y = heading;
+    this.camYaw = heading;
+    this.health = this.maxHealth;
+    this.vel.set(0, 0, 0);
+  },
+
+  // The camera's ground-projected forward and its right-hand vector.
+  cameraBasis: function (camera) {
+    camera.getWorldDirection(this._fwd);
+    this._fwd.y = 0;
+    if (this._fwd.lengthSq() < 1e-6) this._fwd.set(0, 0, -1);
+    this._fwd.normalize();
+    this._right.crossVectors(this._fwd, CVH.UP);
+    return { fwd: this._fwd, right: this._right };
+  },
+
+  update: function (dt, camera) {
+    const pos = this.mesh.position;
+    this.fireCd = Math.max(0, this.fireCd - dt);
+    this.punchT = Math.max(0, this.punchT - dt);
+    this.aimT = Math.max(0, this.aimT - dt);
+
+    if (this.inCar) {
+      const car = this.inCar;
+      this.vel.copy(car.vel);
+      // The logical player position rides with the car even though the body
+      // is hidden inside it: missions, police targeting, the bust meter,
+      // the minimap and pickups all read this position.
+      pos.copy(car.mesh.position);
+      if (car.type === 'moto') {
+        this.mesh.rotation.y = car.heading;
+        this.heading = car.heading;
+        this.parts.legL.rotation.x = -1.15;
+        this.parts.legR.rotation.x = -1.15;
+        this.parts.armL.rotation.x = -0.85;
+        this.parts.armR.rotation.x = -0.85;
+      }
+      if (car.dead) this.exitCar();
+      this.updateCamera(dt, camera);
+      return;
+    }
+
+    // --- camera-relative movement (the basis is the contract; see header) ---
+    const basis = this.cameraBasis(camera);
+    const f = basis.fwd, r = basis.right;
+    const inF = (CVH.input.down('KeyW') || CVH.input.down('ArrowUp') ? 1 : 0)
+              - (CVH.input.down('KeyS') || CVH.input.down('ArrowDown') ? 1 : 0);
+    const inR = (CVH.input.down('KeyD') || CVH.input.down('ArrowRight') ? 1 : 0)
+              - (CVH.input.down('KeyA') || CVH.input.down('ArrowLeft') ? 1 : 0);
+    let mx = f.x * inF + r.x * inR;
+    let mz = f.z * inF + r.z * inR;
+    const mlen = Math.sqrt(mx * mx + mz * mz);
+    const sprint = CVH.input.down('ShiftLeft') || CVH.input.down('ShiftRight');
+    const speed = sprint ? 7.4 : 4.3;
+    if (mlen > 0.01) {
+      mx /= mlen; mz /= mlen;
+      const want = Math.atan2(mx, mz);
+      this.heading = CVH.angleTurn(this.heading, want, 11 * dt);
+      pos.x += mx * speed * dt;
+      pos.z += mz * speed * dt;
+      this.vel.set(mx * speed, 0, mz * speed);
+      this.walkPhase += dt * speed * 2.1;
+    } else {
+      this.vel.multiplyScalar(Math.max(0, 1 - 10 * dt));
+    }
+    CVH.world.collide(pos, 0.45);
+    // Shove out of cars (you cannot stand inside a bonnet).
+    const cars = CVH.vehicles.all;
+    for (let i = 0; i < cars.length; i++) {
+      const c = cars[i], cp = c.mesh.position;
+      const dx = pos.x - cp.x, dz = pos.z - cp.z;
+      const rr = c.cfg.radius + 0.4;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < rr * rr && d2 > 1e-6) {
+        const d = Math.sqrt(d2);
+        pos.x = cp.x + (dx / d) * rr;
+        pos.z = cp.z + (dz / d) * rr;
+      }
+    }
+    this.mesh.rotation.y = this.heading;
+
+    // Combat input.
+    if (CVH.input.clickHit()) this.tryFire(camera);
+    else if (this.weapon === 'smg' && CVH.input.mouseHeld) this.tryFire(camera);
+
+    this._animate(dt, mlen > 0.01 ? speed : 0);
+    this.updateCamera(dt, camera);
+  },
+
+  _animate: function (dt, speedNow) {
+    const P = this.parts;
+    const sw = Math.sin(this.walkPhase) * CVH.clamp(speedNow / 4.3, 0, 1.4) * 0.62;
+    P.legL.rotation.x = sw;
+    P.legR.rotation.x = -sw;
+    if (this.punchT > 0) {
+      const p = 1 - this.punchT / 0.28;
+      P.armR.rotation.x = -2.1 * Math.sin(p * Math.PI);
+      P.armL.rotation.x = -sw * 0.7;
+    } else if (this.weapon !== 'fist' && (this.aimT > 0 || CVH.input.mouseHeld)) {
+      P.armR.rotation.x = -1.5;
+      P.armL.rotation.x = -1.1;
+    } else {
+      P.armR.rotation.x = -sw * 0.8;
+      P.armL.rotation.x = sw * 0.8;
+    }
+    P.armL.rotation.z = 0; P.armR.rotation.z = 0;
+  },
+
+  tryFire: function (camera) {
+    if (this.fireCd > 0 || this.inCar) return;
+    const pos = this.mesh.position;
+    const fwd = { x: Math.sin(this.heading), z: Math.cos(this.heading) };
+
+    if (this.weapon === 'fist') {
+      this.fireCd = 0.34;
+      this.punchT = 0.28;
+      let hitAny = false;
+      for (let i = 0; i < CVH.peds.length; i++) {
+        const ped = CVH.peds[i];
+        if (ped.dead) continue;
+        const pp = ped.parts.group.position;
+        const dx = pp.x - pos.x, dz = pp.z - pos.z;
+        const d = Math.sqrt(dx * dx + dz * dz);
+        if (d < 1.9 && (dx * fwd.x + dz * fwd.z) / (d || 1) > 0.35) {
+          this.damagePed(ped, 45, true);
+          hitAny = true;
+        }
+      }
+      const cars = CVH.vehicles.all;
+      for (let i = 0; i < cars.length; i++) {
+        const c = cars[i], cp = c.mesh.position;
+        if (CVH.dist2d(pos.x, pos.z, cp.x, cp.z) < c.cfg.radius + 1.1) {
+          CVH.vehicles.damage(c, 3, { x: cp.x, y: 0.7, z: cp.z });
+          CVH.audio.crash(0.07);
+          hitAny = true;
+        }
+      }
+      if (hitAny) CVH.audio.punch();
+      return;
+    }
+
+    // Hitscan from the camera's centre, so shots go where the player looks.
+    const kind = this.weapon;
+    this.fireCd = kind === 'smg' ? 0.095 : 0.27;
+    this.aimT = 0.3;
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    if (kind === 'smg') {
+      dir.x += CVH.rand(-0.03, 0.03);
+      dir.y += CVH.rand(-0.02, 0.02);
+      dir.z += CVH.rand(-0.03, 0.03);
+      dir.normalize();
+    }
+    const origin = camera.position.clone();
+    let bestT = 80, hitPed = null, hitCar = null;
+    const raySphere = (cx, cy, cz, rad) => {
+      const ox = cx - origin.x, oy = cy - origin.y, oz = cz - origin.z;
+      const t = ox * dir.x + oy * dir.y + oz * dir.z;
+      if (t < 0.5) return -1;
+      const d2 = ox * ox + oy * oy + oz * oz - t * t;
+      if (d2 > rad * rad) return -1;
+      return t - Math.sqrt(rad * rad - d2);
+    };
+    for (let i = 0; i < CVH.peds.length; i++) {
+      const ped = CVH.peds[i];
+      if (ped.dead) continue;
+      const pp = ped.parts.group.position;
+      const t = raySphere(pp.x, 1.15, pp.z, 0.8);
+      if (t > 0 && t < bestT) { bestT = t; hitPed = ped; hitCar = null; }
+    }
+    const cars = CVH.vehicles.all;
+    for (let i = 0; i < cars.length; i++) {
+      const c = cars[i], cp = c.mesh.position;
+      const t = raySphere(cp.x, 0.75, cp.z, c.cfg.radius + 0.3);
+      if (t > 0 && t < bestT) { bestT = t; hitCar = c; hitPed = null; }
+    }
+    if (dir.y < -0.02) {
+      const tg = -origin.y / dir.y;
+      if (tg > 0 && tg < bestT) { bestT = tg; hitPed = null; hitCar = null; }
+    }
+    const hitPoint = origin.clone().add(dir.clone().multiplyScalar(bestT));
+    const muzzle = new THREE.Vector3(pos.x + fwd.x * 0.5, 1.38, pos.z + fwd.z * 0.5);
+    CVH.fx.tracer(muzzle, hitPoint);
+    CVH.fx.muzzle(muzzle, { x: fwd.x, y: 0, z: fwd.z });
+    CVH.audio.shot(kind);
+    if (hitPed) this.damagePed(hitPed, kind === 'smg' ? 34 : 60, true);
+    else if (hitCar) CVH.vehicles.damage(hitCar, kind === 'smg' ? 4 : 6, hitPoint);
+    CVH.police.reportCrime('shots', pos, true);
+  },
+
+  damagePed: function (ped, dmg, isPlayer) {
+    if (ped.dead) return;
+    ped.health -= dmg;
+    ped.panicFrom = { x: this.mesh.position.x, z: this.mesh.position.z };
+    ped.panicT = 3;
+    CVH.fx.bloodless_puff(ped.parts.group.position);
+    if (ped.health <= 0) {
+      ped.dead = true;
+      ped.deadT = 0;
+      if (isPlayer) CVH.police.reportCrime('murder', ped.parts.group.position, true);
+    } else if (isPlayer) {
+      CVH.police.reportCrime('assault', ped.parts.group.position, true);
+    }
+  },
+
+  takeDamage: function (n, fromPos) {
+    this.health -= n;
+    CVH.fx.shake(0.12);
+    if (fromPos) {
+      const pos = this.mesh.position;
+      const dx = pos.x - fromPos.x, dz = pos.z - fromPos.z;
+      const d = Math.sqrt(dx * dx + dz * dz) || 1;
+      pos.x += (dx / d) * 1.1;
+      pos.z += (dz / d) * 1.1;
+      CVH.world.collide(pos, 0.45);
+    }
+  },
+
+  // ---- cars ----------------------------------------------------------------------
+  nearestCar: function (maxDist) {
+    const pos = this.mesh.position;
+    let best = null, bd = maxDist;
+    for (let i = 0; i < CVH.vehicles.all.length; i++) {
+      const c = CVH.vehicles.all[i];
+      if (c.dead) continue;
+      const d = CVH.dist2d(pos.x, pos.z, c.mesh.position.x, c.mesh.position.z) - c.cfg.radius;
+      if (d < bd) { bd = d; best = c; }
+    }
+    return best;
+  },
+
+  forceEnter: function (car) {
+    if (!car || car.dead) return false;
+    if (car.driver === 'police') {
+      // A stolen cruiser leaves the force the moment the player gets in, so
+      // the pursuit brain can never steer the car the player is driving.
+      CVH.police.removeFromForce(car);
+      CVH.police.reportCrime('theft', car.mesh.position, true);
+    } else if (car.driver === 'traffic') {
+      // The driver bails out and runs.
+      const ped = this._sparePed();
+      if (ped) {
+        const cp = car.mesh.position;
+        ped.parts.group.position.set(cp.x + 2, 0, cp.z);
+        ped.dead = false; ped.health = 100;
+        ped.parts.group.rotation.x = 0;
+        ped.panicFrom = { x: cp.x, z: cp.z };
+        ped.panicT = 3.5;
+      }
+      car.road = null;
+      CVH.police.reportCrime('theft', car.mesh.position, true);
+    }
+    car.driver = 'player';
+    car.aiTarget = null;
+    this.inCar = car;
+    this.mesh.visible = car.type === 'moto';
+    if (car.type === 'moto') this.mesh.position.copy(car.mesh.position);
+    CVH.audio.ui();
+    return true;
+  },
+
+  exitCar: function () {
+    const car = this.inCar;
+    if (!car) return;
+    const cp = car.mesh.position;
+    const f = CVH.vehicles.fwdOf(car);
+    const rx = -f.z, rz = f.x; // the car's right, same cross-product rule
+    const pos = this.mesh.position;
+    pos.set(cp.x + rx * (car.cfg.radius + 1.2), 0, cp.z + rz * (car.cfg.radius + 1.2));
+    CVH.world.collide(pos, 0.45);
+    car.driver = null;
+    car.braking = false;
+    this.inCar = null;
+    this.mesh.visible = true;
+    this.parts.legL.rotation.x = 0;
+    this.parts.legR.rotation.x = 0;
+    this.heading = car.heading;
+    if (CVH.missions) CVH.missions.onPlayerExitCar(car);
+  },
+
+  tryEnterExit: function () {
+    if (this.inCar) { this.exitCar(); return; }
+    const car = this.nearestCar(2.2);
+    if (car) this.forceEnter(car);
+  },
+
+  _sparePed: function () {
+    // Find a far-away pedestrian to recycle as a bailing driver.
+    let best = null, bd = 30;
+    for (let i = 0; i < CVH.peds.length; i++) {
+      const ped = CVH.peds[i];
+      const pp = ped.parts.group.position;
+      const d = CVH.dist2d(pp.x, pp.z, this.mesh.position.x, this.mesh.position.z);
+      if (d > bd) { bd = d; best = ped; }
+    }
+    return best;
+  },
+
+  // ---- camera ----------------------------------------------------------------------
+  updateCamera: function (dt, camera) {
+    const sens = CVH.input.locked ? 0.0026 : 0.005;
+    const dx = CVH.input.mouseDX, dy = CVH.input.mouseDY;
+    if (dx !== 0 || dy !== 0) {
+      this.camYaw -= dx * sens;
+      this.camPitch = CVH.clamp(this.camPitch + dy * sens * 0.8, 0.03, 1.15);
+      this._mouseIdle = 0;
+    } else {
+      this._mouseIdle += dt;
+    }
+    let focus, distWant = 6.2, pitchWant = null;
+    if (this.inCar) {
+      focus = this.inCar.mesh.position;
+      distWant = this.inCar.type === 'moto' ? 6.4 : 8.6;
+      pitchWant = 0.3;
+      // Drift back behind the car when the mouse is idle and it is moving.
+      if (this._mouseIdle > 2.2 && this.inCar.speed > 2) {
+        this.camYaw = CVH.angleTurn(this.camYaw, this.inCar.heading, 1.7 * dt);
+      }
+    } else {
+      focus = this.mesh.position;
+    }
+    if (pitchWant !== null) this.camPitch = CVH.lerp(this.camPitch, pitchWant, 1 - Math.exp(-2 * dt));
+    this.camDist = CVH.lerp(this.camDist, distWant, 1 - Math.exp(-4 * dt));
+    const fx = Math.sin(this.camYaw), fz = Math.cos(this.camYaw);
+    const hback = Math.cos(this.camPitch) * this.camDist;
+    const height = Math.sin(this.camPitch) * this.camDist;
+    camera.position.set(
+      focus.x - fx * hback,
+      focus.y + 1.5 + height,
+      focus.z - fz * hback
+    );
+    if (camera.position.y < 0.7) camera.position.y = 0.7;
+    const sh = CVH.fx.shakeOffset();
+    if (sh) { camera.position.x += sh.x; camera.position.y += sh.y; }
+    camera.lookAt(focus.x, focus.y + 1.5, focus.z);
+  },
+
+  // ---- pedestrians -------------------------------------------------------------------
+  SKINS: [0xc98a5e, 0x8a5a34, 0xe8b088, 0x6e4526],
+  SHIRTS: [0xd8574a, 0x4a7fd8, 0xf0ead8, 0x57b06a, 0xe8a13a, 0x8a5fb0, 0x3ec6c6, 0xe87ab0],
+  PANTS: [0x2c3242, 0x5a4632, 0x3a4a5a, 0x707880, 0x243028],
+  HAIRS: [0x241a12, 0x4a3220, 0x888888, 0xd8c9a8, 0x101010],
+
+  sidewalkPoint: function () {
+    const i = CVH.randInt(0, 6), j = CVH.randInt(0, 4);
+    const cx = CVH.world.cellCX(i), cz = CVH.world.cellCZ(j);
+    const side = CVH.randInt(0, 3), t = CVH.rand(-17, 17);
+    if (side === 0) return { x: cx + t, z: cz - 18.2 };
+    if (side === 1) return { x: cx + t, z: cz + 18.2 };
+    if (side === 2) return { x: cx - 18.2, z: cz + t };
+    return { x: cx + 18.2, z: cz + t };
+  },
+
+  spawnPeds: function (scene) {
+    CVH.peds = [];
+    for (let n = 0; n < 40; n++) {
+      const parts = this.buildHumanoid({
+        skin: CVH.pick(this.SKINS), shirt: CVH.pick(this.SHIRTS),
+        pants: CVH.pick(this.PANTS), hair: CVH.pick(this.HAIRS)
+      });
+      const p = this.sidewalkPoint();
+      parts.group.position.set(p.x, 0, p.z);
+      scene.add(parts.group);
+      CVH.peds.push({
+        parts: parts, heading: CVH.rand(0, CVH.TAU),
+        target: this.sidewalkPoint(), speed: CVH.rand(1.1, 1.7),
+        health: 100, dead: false, deadT: 0, idleT: CVH.rand(0, 2),
+        panicT: 0, panicFrom: null, walkPhase: CVH.rand(0, 6)
       });
     }
   },
 
-  panic(x, z) { this.panicPos = { x, z }; this.panicT = 2.6; },
-
-  update(dt, world) {
-    if (this.panicT > 0) this.panicT -= dt;
-    for (const ped of this.list) {
-      const pos = ped.h.group.position;
-      if (ped.state === 'down') {
-        ped.downT -= dt;
-        if (ped.downT <= 0) {
-          // Quietly recycle far away, good as new.
-          const p = world.randomRoadPoint(Math.random);
-          pos.set(p.x + 8, 0, p.z + 8);
-          ped.h.group.rotation.x = 0;
-          ped.health = 30;
-          ped.state = 'walk';
+  updatePeds: function (dt) {
+    const ppos = this.mesh.position;
+    for (let i = 0; i < CVH.peds.length; i++) {
+      const ped = CVH.peds[i];
+      const grp = ped.parts.group;
+      const pos = grp.position;
+      if (ped.dead) {
+        ped.deadT += dt;
+        grp.rotation.x = CVH.lerp(grp.rotation.x, -Math.PI / 2, 1 - Math.exp(-6 * dt));
+        if (ped.deadT > 7 && CVH.dist2d(pos.x, pos.z, ppos.x, ppos.z) > 35) {
+          const p = this.sidewalkPoint();
+          pos.set(p.x, 0, p.z);
+          grp.rotation.x = 0;
+          ped.dead = false; ped.health = 100; ped.deadT = 0;
+          ped.target = this.sidewalkPoint();
         }
         continue;
       }
-      if (ped.state === 'riding' || ped.state === 'flagged') {
-        if (ped.state === 'flagged') CVH.animateHumanoid(ped.h, dt, 0, 'idle');
-        continue; // missions drive these states
-      }
-      let tx = ped.tx, tz = ped.tz, speed = ped.speed;
-      if (this.panicT > 0 && this.panicPos && CVH.u.dist2(pos.x, pos.z, this.panicPos.x, this.panicPos.z) < 17) {
-        tx = pos.x + (pos.x - this.panicPos.x) * 2;
-        tz = pos.z + (pos.z - this.panicPos.z) * 2;
-        speed = 3.6;
-        ped.state = 'flee';
-      } else if (ped.state === 'flee') ped.state = 'walk';
-      const d = CVH.u.dist2(pos.x, pos.z, tx, tz);
-      ped.retargetT -= dt;
-      if (d < 1.2 || ped.retargetT <= 0) {
-        ped.retargetT = 4 + Math.random() * 5;
-        const p = world.randomRoadPoint(Math.random);
-        ped.tx = pos.x + CVH.u.clamp(p.x - pos.x, -46, 46) + (Math.random() < 0.5 ? -1 : 1) * (world.ROAD / 2 + 1.8) * 0.4;
-        ped.tz = pos.z + CVH.u.clamp(p.z - pos.z, -46, 46);
-      }
-      const desired = Math.atan2(tx - pos.x, tz - pos.z);
-      ped.heading = CVH.u.angleLerp(ped.heading, desired, Math.min(1, dt * 6));
-      pos.x += Math.sin(ped.heading) * speed * dt;
-      pos.z += Math.cos(ped.heading) * speed * dt;
-      world.collideCircle(pos, 0.45);
-      ped.h.group.rotation.y = ped.heading;
-      CVH.animateHumanoid(ped.h, dt, speed / 3.4, 'walk');
-    }
-  },
-
-  hurt(ped, amt, crimePos) {
-    ped.health -= amt;
-    CVH.fx.bloodlessPuff(ped.h.group.position);
-    if (ped.health <= 0 && ped.state !== 'down') {
-      ped.state = 'down';
-      ped.downT = 20;
-      ped.h.group.rotation.x = -Math.PI / 2;
-      ped.h.group.position.y = 0.25;
-      return true; // knocked down
-    }
-    return false;
-  },
-};
-
-// --- camera rig ------------------------------------------------------------------
-CVH.camera = {
-  yaw: 0,
-  pitch: 0.34,
-  dist: 8,
-  pos: new THREE.Vector3(0, 4, -10),
-  snapTo: null,
-
-  snap(pos, heading) { this.yaw = heading || 0; this.snapTo = pos; },
-
-  update(dt, cam, focus, mode) {
-    const I = CVH.input;
-    this.yaw -= I.mouseDX * 0.0032;
-    this.pitch = CVH.u.clamp(this.pitch + I.mouseDY * 0.0026, 0.06, 1.15);
-    const dist = mode === 'car' ? 10.5 : 7.6;
-    this.dist = CVH.u.lerp(this.dist, dist, Math.min(1, dt * 4));
-    const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);
-    const fx = Math.sin(this.yaw) * cp, fz = Math.cos(this.yaw) * cp;
-    const target = new THREE.Vector3(
-      focus.x - fx * this.dist,
-      focus.y + 1.7 + sp * this.dist,
-      focus.z - fz * this.dist
-    );
-    if (target.y < 0.8) target.y = 0.8;
-    if (this.snapTo) {
-      this.pos.copy(target);
-      this.snapTo = null;
-    } else {
-      const k = 1 - Math.exp(-dt * (mode === 'car' ? 7 : 10));
-      this.pos.lerp(target, k);
-    }
-    cam.position.copy(this.pos);
-    cam.lookAt(focus.x, focus.y + 1.55, focus.z);
-  },
-  forward() {
-    const cp = Math.cos(this.pitch);
-    return { x: Math.sin(this.yaw) * cp, y: -Math.sin(this.pitch) + 0.35, z: Math.cos(this.yaw) * cp };
-  },
-};
-
-// --- the player -------------------------------------------------------------------
-CVH.player = {
-  h: null,
-  heading: 0,
-  health: 100,
-  weapon: 'fists',   // 'fists' | 'pistol' | 'smg'
-  fireT: 0,
-  punchT: 0,
-  speedNow: 0,
-
-  create(scene, x, z) {
-    this.h = CVH.makeHumanoid(0x147d8a, 0x2e3a46, 0xd9a066);
-    this.h.group.position.set(x, 0, z);
-    scene.add(this.h.group);
-    // A little gun prop in the right hand, shown when armed.
-    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.14, 0.42),
-      new THREE.MeshLambertMaterial({ color: 0x22262b }));
-    gun.position.set(0, -0.78, 0.2);
-    this.h.armR.add(gun);
-    this.gunMesh = gun;
-    this.gunMesh.visible = false;
-    this.heading = Math.PI * 0.75;
-    return this;
-  },
-
-  get pos() { return this.h.group.position; },
-
-  // On-foot movement; returns true if the player moved meaningfully.
-  update(dt, world) {
-    const I = CVH.input;
-    const axes = I.moveAxes();
-    const sprint = I.down('ShiftLeft') || I.down('ShiftRight');
-    const speed = sprint ? 6.4 : 3.9;
-    let moving = false;
-    if (axes.x !== 0 || axes.z !== 0) {
-      moving = true;
-      const cy = CVH.camera.yaw;
-      const mx = (Math.sin(cy) * axes.z) + (Math.cos(cy) * axes.x);
-      const mz = (Math.cos(cy) * axes.z) - (Math.sin(cy) * axes.x);
-      const len = Math.hypot(mx, mz) || 1;
-      this.pos.x += (mx / len) * speed * dt;
-      this.pos.z += (mz / len) * speed * dt;
-      const desired = Math.atan2(mx, mz);
-      this.heading = CVH.u.angleLerp(this.heading, desired, Math.min(1, dt * 11));
-      this.speedNow = speed;
-    } else {
-      this.speedNow = 0;
-    }
-    world.collideCircle(this.pos, 0.5);
-    this.h.group.rotation.y = this.heading;
-    this.fireT -= dt;
-    if (this.punchT > 0) this.punchT -= dt * 3.2;
-    const mode = this.punchT > 0 ? 'punch' : (this.weapon !== 'fists' && I.mouseDown ? 'aim' : 'walk');
-    CVH.animateHumanoid(this.h, dt, this.speedNow / 6, mode, Math.max(0, this.punchT));
-    this.gunMesh.visible = this.weapon !== 'fists';
-    if (this.gunMesh.visible) this.h.armR.rotation.x = I.mouseDown ? -1.45 : -0.25;
-    return moving;
-  },
-
-  // Attack toward the camera's aim. Returns true if an attack happened.
-  tryAttack() {
-    const I = CVH.input;
-    const M = CVH.main;
-    if (this.weapon === 'fists') {
-      if (!I.mouseClicked) return false;
-      this.punchT = 1;
-      CVH.audio.punch();
-      // Melee reach: 1.6 m in the facing direction.
-      const fx = Math.sin(this.heading), fz = Math.cos(this.heading);
-      for (const ped of CVH.peds.list) {
-        if (ped.state === 'down' || ped.state === 'riding') continue;
-        const pp = ped.h.group.position;
-        const d = CVH.u.dist2(this.pos.x, this.pos.z, pp.x, pp.z);
-        const dot = ((pp.x - this.pos.x) * fx + (pp.z - this.pos.z) * fz) / (d || 1);
-        if (d < 1.7 && dot > 0.4) {
-          const downed = CVH.peds.hurt(ped, 16, this.pos);
-          CVH.police.reportCrime(downed ? 'assault' : 'assault', this.pos);
-          CVH.peds.panic(this.pos.x, this.pos.z);
-          return true;
+      // Recycle walkers who drifted too far from the action.
+      const dPlayer = CVH.dist2d(pos.x, pos.z, ppos.x, ppos.z);
+      if (dPlayer > 105) {
+        for (let tries = 0; tries < 6; tries++) {
+          const p = this.sidewalkPoint();
+          const d = CVH.dist2d(p.x, p.z, ppos.x, ppos.z);
+          if (d > 42 && d < 72) { pos.set(p.x, 0, p.z); ped.target = this.sidewalkPoint(); break; }
         }
       }
-      for (const car of M.cars) {
-        const cp = car.group.position;
-        if (CVH.u.dist2(this.pos.x, this.pos.z, cp.x, cp.z) < car.radius + 1.3) {
-          CVH.vehicles.damage(car, 4);
-          CVH.fx.sparks(cp);
-          CVH.audio.crash(false);
-          return true;
+      // Cars are scary; fast cars are lethal.
+      let threat = null;
+      const cars = CVH.vehicles.all;
+      for (let ci = 0; ci < cars.length; ci++) {
+        const c = cars[ci], cp = c.mesh.position;
+        const d = CVH.dist2d(pos.x, pos.z, cp.x, cp.z);
+        if (c.speed > 3.5 && d < c.cfg.radius + 0.45) {
+          this._pedHitByCar(ped, c);
+          threat = cp;
+          break;
+        }
+        if (c.speed > 4 && d < 4.4) threat = cp;
+      }
+      if (threat) { ped.panicFrom = { x: threat.x, z: threat.z }; ped.panicT = Math.max(ped.panicT, 1.6); }
+
+      let moveX = 0, moveZ = 0, spd = 0;
+      if (ped.panicT > 0) {
+        ped.panicT -= dt;
+        const away = ped.panicFrom || pos;
+        let dx = pos.x - away.x, dz = pos.z - away.z;
+        const d = Math.sqrt(dx * dx + dz * dz) || 1;
+        moveX = dx / d; moveZ = dz / d; spd = 4.6;
+      } else if (ped.idleT > 0) {
+        ped.idleT -= dt;
+      } else {
+        const dx = ped.target.x - pos.x, dz = ped.target.z - pos.z;
+        const d = Math.sqrt(dx * dx + dz * dz);
+        if (d < 1.3) {
+          if (CVH.chance(0.3)) ped.idleT = CVH.rand(0.8, 3);
+          ped.target = this.sidewalkPoint();
+        } else {
+          moveX = dx / d; moveZ = dz / d; spd = ped.speed;
         }
       }
-      return true;
+      if (spd > 0) {
+        ped.heading = CVH.angleTurn(ped.heading, Math.atan2(moveX, moveZ), 6 * dt);
+        pos.x += Math.sin(ped.heading) * spd * dt;
+        pos.z += Math.cos(ped.heading) * spd * dt;
+        CVH.world.collide(pos, 0.4);
+        ped.walkPhase += dt * spd * 2.2;
+      }
+      grp.rotation.y = ped.heading;
+      const sw = Math.sin(ped.walkPhase) * (spd > 2 ? 0.7 : 0.45) * (spd > 0 ? 1 : 0);
+      ped.parts.legL.rotation.x = sw;
+      ped.parts.legR.rotation.x = -sw;
+      if (ped.panicT > 0) {
+        ped.parts.armL.rotation.z = 2.5;
+        ped.parts.armR.rotation.z = -2.5;
+        ped.parts.armL.rotation.x = 0;
+        ped.parts.armR.rotation.x = 0;
+      } else {
+        ped.parts.armL.rotation.z = 0;
+        ped.parts.armR.rotation.z = 0;
+        ped.parts.armL.rotation.x = -sw * 0.8;
+        ped.parts.armR.rotation.x = sw * 0.8;
+      }
     }
-    // Firearms: pistol on click, SMG while held.
-    const wantFire = this.weapon === 'pistol' ? I.mouseClicked : I.mouseDown;
-    if (!wantFire) return false;
-    const rate = this.weapon === 'pistol' ? 0.34 : 0.115;
-    if (this.fireT > 0) return false;
-    this.fireT = rate;
-    const fwd = CVH.camera.forward();
-    if (this.weapon === 'smg') { fwd.x += (Math.random() - 0.5) * 0.05; fwd.z += (Math.random() - 0.5) * 0.05; }
-    const origin = { x: this.pos.x, y: 1.45, z: this.pos.z };
-    CVH.audio.shot();
-    CVH.fx.muzzle({ x: origin.x + fwd.x * 0.7, y: 1.35, z: origin.z + fwd.z * 0.7 });
-    CVH.police.reportCrime('shots', this.pos);
-    CVH.peds.panic(this.pos.x, this.pos.z);
-    // March the ray; first thing hit wins.
-    let hit = null;
-    for (let s = 1; s < 60; s += 0.6) {
-      const x = origin.x + fwd.x * s, y = origin.y + fwd.y * s, z = origin.z + fwd.z * s;
-      if (y < 0) { hit = { x, y: 0.1, z }; break; }
-      if (CVH.world.pointInBuilding(x, z, 0)) { hit = { x, y, z }; break; }
-      let done = false;
-      for (const ped of CVH.peds.list) {
-        if (ped.state === 'down' || ped.state === 'riding') continue;
-        const pp = ped.h.group.position;
-        if (CVH.u.dist2(x, z, pp.x, pp.z) < 0.75 && y < 2) {
-          const downed = CVH.peds.hurt(ped, this.weapon === 'smg' ? 22 : 30, this.pos);
-          if (downed) CVH.police.reportCrime('assault', this.pos);
-          hit = { x: pp.x, y: 1.1, z: pp.z }; done = true; break;
-        }
-      }
-      if (done) break;
-      for (const car of M.cars) {
-        const cp = car.group.position;
-        if (CVH.u.dist2(x, z, cp.x, cp.z) < car.radius + 0.4 && y < 2.2) {
-          CVH.vehicles.damage(car, this.weapon === 'smg' ? 7 : 10);
-          CVH.fx.sparks({ x, y, z });
-          if (car.driver === 'police') CVH.police.reportCrime('policeHit', this.pos);
-          hit = { x, y, z }; done = true; break;
-        }
-      }
-      if (done) break;
-    }
-    if (!hit) hit = { x: origin.x + fwd.x * 60, y: Math.max(0.2, origin.y + fwd.y * 60), z: origin.z + fwd.z * 60 };
-    CVH.fx.tracer({ x: origin.x + fwd.x, y: 1.35, z: origin.z + fwd.z }, hit);
-    return true;
   },
 
-  hurt(amt) {
-    this.health -= amt;
-    if (this.health < 0) this.health = 0;
-  },
+  _pedHitByCar: function (ped, car) {
+    const pos = ped.parts.group.position;
+    const dmg = car.speed * 7;
+    ped.health -= dmg;
+    const cp = car.mesh.position;
+    const dx = pos.x - cp.x, dz = pos.z - cp.z;
+    const d = Math.sqrt(dx * dx + dz * dz) || 1;
+    pos.x += (dx / d) * 2.2;
+    pos.z += (dz / d) * 2.2;
+    CVH.world.collide(pos, 0.4);
+    CVH.fx.bloodless_puff(pos);
+    CVH.audio.crash(0.18);
+    ped.panicFrom = { x: cp.x, z: cp.z };
+    ped.panicT = 3;
+    if (ped.health <= 0 && !ped.dead) {
+      ped.dead = true;
+      ped.deadT = 0;
+      if (car.driver === 'player') CVH.police.reportCrime('murder', pos, true);
+    } else if (car.driver === 'player') {
+      CVH.police.reportCrime('hitrun', pos, true);
+    }
+  }
 };
