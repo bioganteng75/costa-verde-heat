@@ -1,134 +1,146 @@
-// police.js — the wanted system. Crimes add heat when witnessed; heat cools
-// when nobody watches. Patrol cars spawn at the city edge, chase with
-// target-leading steering, and fill the bust meter when they pin you down.
-window.CVH = window.CVH || {};
-
+// police.js — the wanted system. Crimes are only heat if somebody sees them:
+// a pedestrian within earshot or a cruiser nearby. Heat decays while the
+// player stays unseen. Cruisers spawn at the city edge, steer for where the
+// player is heading, and fill the bust meter when they pin a slow player.
 CVH.police = {
-  heat: 0, stars: 0, unseenT: 99, bust: 0,
-  cars: [], _spawnT: 0, _flashT: 0,
-  CRIMES: { theft: 26, assault: 30, shot: 18, hitrun: 46, policeHit: 38, property: 12, reckless: 8 },
-  THRESH: [0, 12, 32, 58, 88, 122],
+  heat: 0,          // 0..500; stars = ceil(heat/100)
+  stars: 0,
+  cars: [],         // cruisers currently in the force (driver === 'police')
+  unseenT: 0,
+  bust: 0,          // 0..1
+  _spawnT: 0,
+  HEAT: { theft: 55, assault: 70, shots: 45, hitAndRun: 110, policeHit: 120, reckless: 22 },
 
-  reset() { this.heat = 0; this.stars = 0; this.bust = 0; this.unseenT = 99; },
-
-  setHeat(h) {
-    this.heat = CVH.util.clamp(h, 0, 130);
-    this._recalc();
-  },
-  _recalc() {
-    let s = 0;
-    for (let i = 0; i < this.THRESH.length; i++) if (this.heat >= this.THRESH[i]) s = i;
-    this.stars = s;
-  },
-
-  // A crime at a position: full heat if a cop or a pedestrian can see it,
-  // partial heat (word gets around) otherwise.
   reportCrime(kind, pos) {
-    const G = CVH.G;
-    if (!G || G.state !== 'playing') return;
-    let seen = false;
-    for (const c of this.cars) {
-      if (!c.dead && CVH.util.dist2D(pos.x, pos.z, c.group.position.x, c.group.position.z) < 55) { seen = true; break; }
+    let witnessed = false;
+    for (const ped of CVH.peds.list) {
+      const pp = ped.h.group.position;
+      if (CVH.u.dist2(pos.x, pos.z, pp.x, pp.z) < 26) { witnessed = true; break; }
     }
-    if (!seen) for (const ped of G.peds.list) {
-      if (ped.state !== 'down' && CVH.util.dist2D(pos.x, pos.z, ped.pos.x, ped.pos.z) < 26) { seen = true; break; }
+    if (!witnessed) {
+      for (const c of this.cars) {
+        const cp = c.group.position;
+        if (CVH.u.dist2(pos.x, pos.z, cp.x, cp.z) < 38) { witnessed = true; break; }
+      }
     }
-    if (seen) this.unseenT = 0;
-    const base = this.CRIMES[kind] || 10;
-    this.setHeat(this.heat + (seen ? base : base * 0.45));
-    if (kind === 'hitrun' || kind === 'assault') G.peds.scare(pos, 22);
+    if (!witnessed) return false;
+    this.heat = Math.min(500, this.heat + (this.HEAT[kind] || 30));
+    this._recalc();
+    return true;
   },
 
-  // Is any officer currently looking at the player?
+  _recalc() { this.stars = this.heat <= 0 ? 0 : Math.min(5, Math.ceil(this.heat / 100)); },
+
   playerSeen() {
-    const G = CVH.G;
-    const f = G.focusPos();
+    const P = CVH.player.pos;
     for (const c of this.cars) {
-      if (!c.dead && CVH.util.dist2D(f.x, f.z, c.group.position.x, c.group.position.z) < 55) return true;
+      if (c.dead || c.driver !== 'police') continue;
+      const cp = c.group.position;
+      if (CVH.u.dist2(P.x, P.z, cp.x, cp.z) < 46) return true;
     }
     return false;
   },
 
-  update(dt) {
-    const G = CVH.G, W = CVH.world;
-    // Cooling off
-    if (this.playerSeen()) this.unseenT = 0; else this.unseenT += dt;
-    if (this.unseenT > 5 && this.heat > 0) {
-      this.setHeat(this.heat - dt * (this.stars >= 3 ? 2.1 : 3.4));
-      if (this.heat <= 0.01) { this.heat = 0; this._recalc(); }
+  // QA fix: a cruiser the player steals leaves the force at once, so the
+  // pursuit below can never steer a car the player is driving.
+  removeFromForce(car) {
+    const i = this.cars.indexOf(car);
+    if (i >= 0) this.cars.splice(i, 1);
+  },
+
+  reset(scene) {
+    // Turn every cruiser back into a parked car and clear all heat.
+    for (const c of this.cars) {
+      if (c.driver === 'police') c.driver = 'parked';
+      c.ai = null;
     }
-    // Despawn the force when the heat is gone: they peel off as traffic.
+    this.cars = [];
+    this.heat = 0;
+    this.stars = 0;
+    this.bust = 0;
+    this.unseenT = 0;
+  },
+
+  update(dt, scene) {
+    const M = CVH.main;
+    const W = CVH.world;
+    const P = CVH.player.pos;
+    const playerCar = M.playerCar;
+    const focus = playerCar ? playerCar.group.position : P;
+    const playerSpeed = playerCar ? Math.abs(playerCar.speed) : CVH.player.speedNow;
+
+    // Heat decay while unseen.
+    if (this.playerSeen()) this.unseenT = 0; else this.unseenT += dt;
+    if (this.unseenT > 4 && this.heat > 0) {
+      this.heat = Math.max(0, this.heat - dt * (this.stars >= 3 ? 5 : 9));
+      this._recalc();
+    }
+
+    // QA fix: when the heat dies, the force stands down — but a wrecked
+    // cruiser stays a wreck. Only intact cars peel off and become traffic.
     if (this.stars === 0 && this.cars.length) {
-      for (const c of this.cars) { c.driver = 'traffic'; CVH.vehicles.initTraffic(c, W); }
+      for (const c of this.cars) {
+        if (c.driver !== 'police') continue;
+        if (c.dead) {
+          c.driver = 'parked';
+        } else {
+          CVH.vehicles.initTraffic(c, W);
+        }
+      }
       this.cars = [];
       this.bust = 0;
     }
-    // Spawning
-    const desired = this.stars === 0 ? 0 : Math.min(1 + this.stars, 6);
+
+    // Spawn cruisers at edge intersections until the force matches the stars.
+    const desired = this.stars === 0 ? 0 : Math.min(2 + this.stars, 6);
     this._spawnT -= dt;
-    if (this.cars.filter((c) => !c.dead).length < desired && this._spawnT <= 0) {
-      this._spawnT = 2.2;
-      this._spawnOne();
+    const active = this.cars.filter((c) => !c.dead).length;
+    if (active < desired && this._spawnT <= 0) {
+      this._spawnT = 2.4;
+      const edges = [
+        { x: W.roadX(0), z: W.roadZ(Math.floor(Math.random() * (W.ROWS + 1))) },
+        { x: W.roadX(W.COLS), z: W.roadZ(Math.floor(Math.random() * (W.ROWS + 1))) },
+        { x: W.roadX(Math.floor(Math.random() * (W.COLS + 1))), z: W.roadZ(0) },
+        { x: W.roadX(Math.floor(Math.random() * (W.COLS + 1))), z: W.roadZ(W.ROWS) },
+      ];
+      let spot = edges[Math.floor(Math.random() * edges.length)];
+      if (CVH.u.dist2(spot.x, spot.z, focus.x, focus.z) < 55) spot = edges[(edges.indexOf(spot) + 2) % edges.length];
+      const cruiser = CVH.vehicles.create(scene, 'police', spot.x, spot.z, Math.random() * Math.PI * 2, 0);
+      cruiser.driver = 'police';
+      M.cars.push(cruiser);
+      this.cars.push(cruiser);
     }
-    // Pursuit
-    const focus = G.focusPos();
-    const fvel = G.focusVel();
+
+    // Pursuit: steer for the player's predicted position.
     let anyNear = false;
-    this._flashT += dt;
     for (const car of this.cars) {
-      if (car.dead) continue;
-      const p = car.group.position;
-      const d = CVH.util.dist2D(p.x, p.z, focus.x, focus.z);
-      if (d < 65) anyNear = true;
-      // Flash the light bar
-      const phase = (this._flashT * 2.4 + (car.special || 0)) % 1;
-      car.refs.lightL.material.color.setHex(phase < 0.5 ? 0xff3535 : 0x571010);
-      car.refs.lightR.material.color.setHex(phase < 0.5 ? 0x102a57 : 0x3f7dff);
-      if (d > 190) { // hopelessly far: teleport-respawn nearer the action
-        this._placeNear(car);
-        continue;
-      }
-      const tx = focus.x + fvel.x * 0.55, tz = focus.z + fvel.z * 0.55;
-      const ctrl = CVH.vehicles.controlsToward(car, tx, tz, dt, 26 + this.stars * 2.2);
-      CVH.vehicles.updateFree(car, dt, ctrl);
+      if (car.dead || car.driver !== 'police') continue; // never steer a stolen car
+      const cp = car.group.position;
+      const d = CVH.u.dist2(cp.x, cp.z, focus.x, focus.z);
+      if (d < 60) CVH.vehicles.flashPolice(car, M.time);
+      if (d < 9) anyNear = true;
+      const lead = playerCar ? Math.min(1.1, d / 26) : 0.4;
+      const tx = focus.x + Math.sin(playerCar ? playerCar.heading : CVH.player.heading) * (playerCar ? Math.abs(playerCar.speed) : 2) * lead;
+      const tz = focus.z + Math.cos(playerCar ? playerCar.heading : CVH.player.heading) * (playerCar ? Math.abs(playerCar.speed) : 2) * lead;
+      const desired = Math.atan2(tx - cp.x, tz - cp.z);
+      const diff = CVH.u.angleDiff(car.heading, desired);
+      const ctl = {
+        throttle: d > 7 ? 1 : 0.25,
+        steer: CVH.u.clamp(diff * 1.7, -1, 1),
+        brake: Math.abs(diff) > 2.4 && d < 12,
+        handbrake: false,
+      };
+      CVH.vehicles.step(car, ctl, dt);
+      W.collideCircle(cp, car.radius + 0.4);
     }
-    CVH.audio.siren(anyNear && this.stars > 0);
-    // Bust meter
-    const focusSpeed = G.focusSpeed();
-    let pinning = false;
-    for (const car of this.cars) {
-      if (car.dead) continue;
-      const d = CVH.util.dist2D(car.group.position.x, car.group.position.z, focus.x, focus.z);
-      if (d < 8.5 && focusSpeed < 3) { pinning = true; break; }
-    }
-    if (pinning && this.stars > 0) this.bust = Math.min(1, this.bust + dt * 0.45);
-    else this.bust = Math.max(0, this.bust - dt * 0.55);
-    if (this.bust >= 1) G.busted();
-  },
+    CVH.audio.siren(this.stars > 0 && this.cars.some((c) => !c.dead && c.driver === 'police'));
 
-  _spawnOne() {
-    const G = CVH.G, W = CVH.world;
-    const car = CVH.vehicles.create('police', { driver: 'police', special: Math.random() });
-    this._placeNear(car);
-    G.scene.add(car.group);
-    G.cars.push(car);
-    this.cars.push(car);
-  },
-
-  _placeNear(car) {
-    const G = CVH.G, W = CVH.world;
-    const f = G.focusPos();
-    let best = null, bestScore = -1;
-    for (let tries = 0; tries < 12; tries++) {
-      const ix = W.roadXs[Math.floor(Math.random() * W.roadXs.length)];
-      const iz = W.roadZs[Math.floor(Math.random() * W.roadZs.length)];
-      const d = CVH.util.dist2D(ix, iz, f.x, f.z);
-      const score = d > 65 && d < 130 ? 100 - Math.abs(d - 90) : d;
-      if (score > bestScore) { bestScore = score; best = { x: ix, z: iz }; }
+    // Bust meter: police close + player slow = trouble.
+    if (this.stars > 0 && anyNear && playerSpeed < 2.2) {
+      this.bust += dt / 2.3;
+      if (this.bust >= 1) { this.bust = 0; M.onBusted(); }
+    } else {
+      this.bust = Math.max(0, this.bust - dt * 0.55);
     }
-    car.group.position.set(best.x, 0, best.z);
-    car.vel.set(0, 0, 0);
-    car.heading = Math.atan2(f.x - best.x, f.z - best.z);
-    car.group.rotation.y = car.heading;
   },
 };

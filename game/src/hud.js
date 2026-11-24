@@ -1,144 +1,172 @@
-// hud.js — DOM heads-up display: cash, health, wanted stars, objective
-// banner, speedometer, bust meter, toasts, menus, and the 2D minimap.
-window.CVH = window.CVH || {};
-
+// hud.js — everything drawn over the 3D view: cash/health/weapon panel,
+// wanted stars, bust meter, objective banner, speedometer, toasts, the live
+// 2D minimap, and the full-screen menus (start, pause, busted/wasted, and
+// the story ending). Buttons call straight into CVH.main.
 CVH.hud = {
   el: {},
-  _toastUntil: 0,
-  _mm: null, _mmCtx: null,
 
   init() {
     const $ = (id) => document.getElementById(id);
     this.el = {
-      hud: $('hud'), cash: $('cash'), hpBar: $('hpBar'), weapon: $('weapon'),
-      stars: $('stars'), bustWrap: $('bustWrap'), bustBar: $('bustBar'),
-      banner: $('banner'), objLabel: $('objLabel'), objSub: $('objSub'),
-      speedo: $('speedo'), toast: $('toast'), toastTitle: $('toastTitle'), toastBody: $('toastBody'),
-      prompt: $('prompt'), crosshair: $('crosshair'),
-      menu: $('menu'), pause: $('pause'), end: $('end'), endTitle: $('endTitle'), endText: $('endText'),
-      btnContinue: $('btnContinue'), muteState: $('muteState'),
+      hud: $('hud'), cash: $('cash'), healthFill: $('healthFill'), weapon: $('weapon'),
+      stars: $('stars'), bustWrap: $('bustWrap'), bustFill: $('bustFill'),
+      banner: $('banner'), bannerLabel: $('bannerLabel'), bannerMeta: $('bannerMeta'),
+      speedo: $('speedo'), speedVal: $('speedVal'), speedCar: $('speedCar'), integrityFill: $('integrityFill'),
+      toasts: $('toasts'), minimap: $('minimap'), damage: $('damage'),
+      menu: $('menu'), btnNew: $('btnNew'), btnContinue: $('btnContinue'), menuNote: $('menuNote'),
+      pauseMenu: $('pauseMenu'), btnResume: $('btnResume'), btnSave: $('btnSave'),
+      btnRestart: $('btnRestart'), btnSound: $('btnSound'), muteState: $('muteState'),
+      endScreen: $('endScreen'), endTitle: $('endTitle'), endText: $('endText'), btnRespawn: $('btnRespawn'),
+      endingScreen: $('endingScreen'), endingStats: $('endingStats'),
+      btnRoam: $('btnRoam'), btnNewGame2: $('btnNewGame2'),
     };
-    this._mm = $('minimap');
-    this._mmCtx = this._mm.getContext('2d');
-    const M = () => CVH.main;
-    $('btnNew').addEventListener('click', () => { CVH.audio.init(); M().newGame(); });
-    this.el.btnContinue.addEventListener('click', () => { CVH.audio.init(); M().continueGame(); });
-    $('btnResume').addEventListener('click', () => M().resume());
-    $('btnSave').addEventListener('click', () => { M().saveGame(); this.toast('Saved', 'Progress tucked away safely.', 1800); });
-    $('btnRestart').addEventListener('click', () => M().restart());
-    $('btnMute').addEventListener('click', () => { const m = CVH.audio.toggleMute(); this.el.muteState.textContent = m ? 'off' : 'on'; });
-    $('btnAgain').addEventListener('click', () => M().respawn());
+    const M = CVH.main;
+    this.el.btnNew.addEventListener('click', () => { CVH.audio.ensure(); CVH.audio.click(); M.newGame(); });
+    this.el.btnContinue.addEventListener('click', () => { CVH.audio.ensure(); CVH.audio.click(); M.continueGame(); });
+    this.el.btnResume.addEventListener('click', () => { CVH.audio.click(); M.resume(); });
+    this.el.btnSave.addEventListener('click', () => { CVH.audio.click(); M.saveGame(); this.toast('Saved', 'Progress tucked away safely.', 1400); });
+    this.el.btnRestart.addEventListener('click', () => { CVH.audio.click(); M.restartStory(); });
+    this.el.btnSound.addEventListener('click', () => { M.toggleMute(); });
+    this.el.btnRespawn.addEventListener('click', () => { CVH.audio.click(); M.respawn(); });
+    this.el.btnRoam.addEventListener('click', () => { CVH.audio.click(); M.closeEnding(); });
+    this.el.btnNewGame2.addEventListener('click', () => { CVH.audio.click(); M.newGame(); });
+    this._mm = this.el.minimap.getContext('2d');
+    this.syncMuteLabel();
   },
 
-  showMenu(canContinue) {
-    this.el.menu.style.display = 'flex';
-    this.el.btnContinue.style.display = canContinue ? 'block' : 'none';
-    this.el.hud.style.display = 'none';
+  // QA fix: the SOUND label is refreshed from the audio module's real state
+  // through this one function, whichever control toggled the mute.
+  syncMuteLabel() {
+    if (this.el.muteState) this.el.muteState.textContent = CVH.audio.muted ? 'OFF' : 'ON';
   },
-  hideMenu() { this.el.menu.style.display = 'none'; this.el.hud.style.display = 'block'; },
-  showPause() { this.el.pause.style.display = 'flex'; },
-  hidePause() { this.el.pause.style.display = 'none'; },
-  showEnd(title, text) {
-    this.el.endTitle.textContent = title;
-    this.el.endText.textContent = text;
-    this.el.end.style.display = 'flex';
-  },
-  hideEnd() { this.el.end.style.display = 'none'; },
 
   toast(title, body, ms) {
-    this.el.toastTitle.textContent = title;
-    this.el.toastBody.textContent = body;
-    this.el.toast.style.opacity = '1';
-    this.el.toast.style.transform = 'translateY(0)';
-    this._toastUntil = performance.now() + (ms || 3000);
+    const div = document.createElement('div');
+    div.className = 'toast';
+    div.innerHTML = '<b></b><span></span>';
+    div.querySelector('b').textContent = title;
+    div.querySelector('span').textContent = body;
+    this.el.toasts.appendChild(div);
+    setTimeout(() => { div.classList.add('out'); setTimeout(() => div.remove(), 450); }, ms || 2600);
+    while (this.el.toasts.children.length > 3) this.el.toasts.firstChild.remove();
   },
 
-  setPrompt(text) {
-    if (text) { this.el.prompt.textContent = text; this.el.prompt.style.opacity = '1'; }
-    else this.el.prompt.style.opacity = '0';
+  setBanner(label, meta) {
+    if (!label) { this.el.banner.style.opacity = '0'; return; }
+    this.el.banner.style.opacity = '1';
+    this.el.bannerLabel.textContent = label;
+    this.el.bannerMeta.textContent = meta || '';
   },
 
-  update(dt) {
-    const G = CVH.G, P = CVH.playerCtl, POL = CVH.police;
-    if (performance.now() > this._toastUntil) {
-      this.el.toast.style.opacity = '0';
-      this.el.toast.style.transform = 'translateY(-8px)';
-    }
-    if (G.state !== 'playing' && G.state !== 'paused') return;
-    this.el.cash.textContent = '$' + Math.floor(G.cash);
-    const hpFrac = Math.max(0, P.hp / P.maxHp);
-    this.el.hpBar.style.width = (hpFrac * 100).toFixed(0) + '%';
-    this.el.hpBar.style.background = hpFrac < 0.3 ? '#e23b3b' : '#59d977';
-    this.el.weapon.textContent = G.playerCar ? G.playerCar.type.toUpperCase() : (P.weapon === 'fist' ? 'FISTS' : P.weapon.toUpperCase());
-    // Wanted stars
-    let starsHtml = '';
-    for (let i = 0; i < 5; i++) starsHtml += '<span class="' + (i < POL.stars ? 'on' : '') + '">★</span>';
-    if (this._starsCache !== starsHtml) { this.el.stars.innerHTML = starsHtml; this._starsCache = starsHtml; }
-    this.el.stars.style.opacity = POL.stars > 0 ? '1' : '0.25';
-    // Bust meter
-    if (POL.bust > 0.02) {
-      this.el.bustWrap.style.display = 'block';
-      this.el.bustBar.style.width = (POL.bust * 100).toFixed(0) + '%';
-    } else this.el.bustWrap.style.display = 'none';
-    // Objective banner
+  flashDamage() {
+    this.el.damage.style.opacity = '0.55';
+    setTimeout(() => { this.el.damage.style.opacity = '0'; }, 90);
+  },
+
+  showMenu(hasSave) {
+    this.el.menu.style.display = 'flex';
+    this.el.btnContinue.style.display = hasSave ? 'block' : 'none';
+    this.el.menuNote.textContent = hasSave ? 'A saved run is waiting for you.' : 'No saved run yet — start a new one.';
+  },
+  hideMenu() { this.el.menu.style.display = 'none'; },
+  showPause() { this.el.pauseMenu.style.display = 'flex'; this.syncMuteLabel(); },
+  hidePause() { this.el.pauseMenu.style.display = 'none'; },
+  showEnd(kind, text) {
+    this.el.endTitle.textContent = kind === 'busted' ? 'BUSTED' : 'WASTED';
+    this.el.endTitle.style.color = kind === 'busted' ? '#7fb5ff' : '#ff7a6b';
+    this.el.endText.textContent = text;
+    this.el.endScreen.style.display = 'flex';
+  },
+  hideEnd() { this.el.endScreen.style.display = 'none'; },
+
+  showEnding(stats) {
+    this.el.endingStats.innerHTML =
+      '<div>Jobs completed <b>6 / 6</b></div>' +
+      '<div>Total earnings <b>' + CVH.u.fmtMoney(stats.earned) + '</b></div>' +
+      '<div>Cash in pocket <b>' + CVH.u.fmtMoney(stats.cash) + '</b></div>' +
+      '<div>Cash packages found <b>' + stats.packages + ' / ' + stats.packagesTotal + '</b></div>';
+    this.el.endingScreen.style.display = 'flex';
+  },
+  hideEnding() { this.el.endingScreen.style.display = 'none'; },
+
+  // Per-frame refresh of the small stuff.
+  frame(state) {
+    const M = CVH.main;
+    this.el.cash.textContent = CVH.u.fmtMoney(M.cash);
+    this.el.healthFill.style.width = CVH.u.clamp(CVH.player.health, 0, 100) + '%';
+    this.el.healthFill.style.background = CVH.player.health < 30 ? '#e03c31' : '#57c256';
+    this.el.weapon.textContent = { fists: 'FISTS', pistol: 'PISTOL', smg: 'SMG' }[CVH.player.weapon];
+    const st = CVH.police.stars;
+    this.el.stars.textContent = '★★★★★'.slice(0, st) + '☆☆☆☆☆'.slice(0, 5 - st);
+    this.el.stars.style.opacity = st > 0 ? '1' : '0.25';
+    const bust = CVH.police.bust;
+    this.el.bustWrap.style.opacity = bust > 0.02 ? '1' : '0';
+    this.el.bustFill.style.width = (bust * 100) + '%';
     const obj = CVH.missions.objective();
-    const focus = G.focusPos();
     if (obj) {
-      this.el.banner.style.opacity = '1';
-      this.el.objLabel.textContent = obj.label;
-      let sub = '';
-      if (obj.shake) sub = POL.stars > 0 ? ('Heat: ' + POL.stars + '★ — stay out of sight') : 'Clear!';
-      else if (obj.x !== null && obj.x !== undefined) sub = Math.round(CVH.util.dist2D(focus.x, focus.z, obj.x, obj.z)) + ' m';
-      if (obj.timer !== null && obj.timer !== undefined) sub += (sub ? '  •  ' : '') + '⏱ ' + Math.max(0, Math.ceil(obj.timer)) + 's';
-      this.el.objSub.textContent = sub;
-    } else this.el.banner.style.opacity = '0';
-    // Speedometer
-    if (G.playerCar) {
+      let meta = '';
+      if (obj.x !== null && obj.x !== undefined) {
+        const f = M.playerCar ? M.playerCar.group.position : CVH.player.pos;
+        meta = Math.round(CVH.u.dist2(f.x, f.z, obj.x, obj.z)) + ' m';
+      }
+      if (obj.timer > 0) meta += (meta ? ' · ' : '') + CVH.u.fmtTime(obj.timer);
+      this.setBanner(obj.label, meta);
+    } else {
+      this.setBanner(M.storyDoneCache ? 'Free roam — Costa Verde is yours.' : null);
+    }
+    if (M.playerCar) {
       this.el.speedo.style.opacity = '1';
-      this.el.speedo.textContent = Math.round(G.playerCar.speed2D() * 3.6) + ' km/h';
-    } else this.el.speedo.style.opacity = '0';
-    // Crosshair only on foot with a gun out
-    this.el.crosshair.style.opacity = (!G.playerCar && P.weapon !== 'fist' && G.state === 'playing') ? '1' : '0';
-    this._drawMinimap(focus);
+      this.el.speedVal.textContent = Math.round(Math.abs(M.playerCar.speed) * 3.6);
+      this.el.speedCar.textContent = M.playerCar.type.toUpperCase();
+      this.el.integrityFill.style.width = M.playerCar.health + '%';
+    } else {
+      this.el.speedo.style.opacity = '0';
+    }
+    this._drawMinimap();
   },
 
-  _drawMinimap(focus) {
-    const ctx = this._mmCtx, W = CVH.world;
-    const cw = this._mm.width, ch = this._mm.height;
-    const sx = cw / (W.MAX_X - W.MIN_X), sz = ch / (W.MAX_Z - W.MIN_Z);
-    const X = (x) => (x - W.MIN_X) * sx, Z = (z) => (z - W.MIN_Z) * sz;
-    ctx.fillStyle = '#20313a'; ctx.fillRect(0, 0, cw, ch);
-    ctx.fillStyle = '#c9b078'; ctx.fillRect(X(262), 0, (W.MAX_X - 262) * sx, ch);       // beach
-    ctx.strokeStyle = 'rgba(200,215,225,0.5)'; ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (const rx of W.roadXs) { ctx.moveTo(X(rx), 0); ctx.lineTo(X(rx), ch); }
-    for (const rz of W.roadZs) { ctx.moveTo(0, Z(rz)); ctx.lineTo(cw, Z(rz)); }
-    ctx.stroke();
-    // Services
-    const L = W.landmarks;
-    ctx.fillStyle = '#39d98a';
-    ctx.fillRect(X(L.paynspray.x) - 2, Z(L.paynspray.z) - 2, 4, 4);
-    // Objective
+  _drawMinimap() {
+    const g = this._mm;
+    const W = CVH.world;
+    const cw = 190, ch = 150;
+    const sx = cw / (W.X1 - W.X0), sz = ch / (W.Z1 - W.Z0);
+    const X = (x) => (x - W.X0) * sx, Z = (z) => (z - W.Z0) * sz;
+    g.fillStyle = '#274b63';
+    g.fillRect(0, 0, cw, ch);
+    g.fillStyle = '#8fa36b';
+    g.fillRect(0, 0, X(W.WATER_X), ch);
+    g.fillStyle = '#e6d6a4';
+    g.fillRect(X(224), 0, X(W.WATER_X) - X(224), ch);
+    g.strokeStyle = 'rgba(30,32,36,0.8)';
+    g.lineWidth = 2.4;
+    for (let i = 0; i <= W.COLS; i++) { g.beginPath(); g.moveTo(X(W.roadX(i)), 0); g.lineTo(X(W.roadX(i)), ch); g.stroke(); }
+    for (let j = 0; j <= W.ROWS; j++) { g.beginPath(); g.moveTo(0, Z(W.roadZ(j))); g.lineTo(X(W.WATER_X), Z(W.roadZ(j))); g.stroke(); }
+    // Objective.
     const obj = CVH.missions.objective();
     if (obj && obj.x !== null && obj.x !== undefined) {
-      const pulse = 3 + Math.sin(performance.now() * 0.008) * 1.2;
-      ctx.fillStyle = obj.taxi ? '#59d6ff' : '#ffc93f';
-      ctx.beginPath(); ctx.arc(X(obj.x), Z(obj.z), pulse, 0, 6.29); ctx.fill();
+      g.fillStyle = '#ffc93e';
+      g.beginPath(); g.arc(X(obj.x), Z(obj.z), 4, 0, 7); g.fill();
+      g.strokeStyle = 'rgba(255,201,62,0.6)';
+      g.beginPath(); g.arc(X(obj.x), Z(obj.z), 6.5 + Math.sin(performance.now() / 240) * 1.6, 0, 7); g.stroke();
     }
-    // Police blips
-    ctx.fillStyle = (performance.now() % 600 < 300) ? '#ff4444' : '#4477ff';
+    // Police blips.
+    g.fillStyle = '#ff4d4d';
     for (const c of CVH.police.cars) {
       if (c.dead) continue;
-      ctx.fillRect(X(c.group.position.x) - 2, Z(c.group.position.z) - 2, 4, 4);
+      const p = c.group.position;
+      g.fillRect(X(p.x) - 2, Z(p.z) - 2, 4, 4);
     }
-    // Player arrow
-    const heading = CVH.G.playerCar ? CVH.G.playerCar.heading : CVH.playerCtl.heading;
-    ctx.save();
-    ctx.translate(X(focus.x), Z(focus.z));
-    ctx.rotate(Math.PI - heading); // arrow tip starts pointing up (-z world)
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.moveTo(0, -5.5); ctx.lineTo(3.6, 4); ctx.lineTo(-3.6, 4); ctx.closePath(); ctx.fill();
-    ctx.restore();
+    // Player arrow (or the car they're driving).
+    const M = CVH.main;
+    const f = M.playerCar ? M.playerCar.group.position : CVH.player.pos;
+    const hd = M.playerCar ? M.playerCar.heading : CVH.player.heading;
+    g.save();
+    g.translate(X(f.x), Z(f.z));
+    g.rotate(Math.PI - hd);
+    g.fillStyle = '#ffffff';
+    g.beginPath();
+    g.moveTo(0, -5.5); g.lineTo(3.8, 4.4); g.lineTo(0, 2.4); g.lineTo(-3.8, 4.4);
+    g.closePath(); g.fill();
+    g.restore();
   },
 };
