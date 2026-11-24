@@ -1,153 +1,166 @@
-// police.js — wanted heat, stars, cruiser spawning and pursuit, bust.
-// Rules that matter:
-//  * spawnCruiser ALWAYS finds a spot: up to 40 samples in the 52–85 m
-//    annulus around the player, then a constructive fallback.
-//  * entering a cruiser removes it from `force` at once (see player.js);
-//    pursuit only steers cars whose driver is exactly 'police'.
-//  * heat decays only with no live cruiser within 115 m ("contact").
-//  * on stand-down, dead cruisers become 'wreck', intact ones become
-//    traffic — a wreck is never revived as traffic.
+// police.js — wanted heat, pursuit AI, bust meter, reliable cruiser spawns,
+// and stand-down rules: wrecked cruisers stay wrecks, intact ones peel off
+// into traffic. A stolen cruiser is removed from the force the moment the
+// player gets in, and pursuit only ever steers cars with driver 'police'.
 (function () {
   'use strict';
-  var CVH = window.CVH;
   var U = CVH.util;
+  var W = CVH.world;
+  var rng = U.makeRng(777);
 
-  var police = {
-    heat: 0,          // 0..500
-    force: [],        // cruisers currently on duty
-    bust: 0,          // 0..1 bust meter
-    spawnCooldown: 0,
-    flashPhase: 0
-  };
+  var heat = 0;               // 0..250
+  var force = [];             // cruisers currently hunting (driver === 'police')
+  var spawnTimer = 0;
+  var bust = 0;               // 0..100
 
-  police.stars = function () {
-    return Math.min(5, Math.ceil(police.heat / 100));
-  };
+  function stars() { return Math.min(5, Math.ceil(heat / 50)); }
+  function addHeat(n) {
+    heat = U.clamp(heat + n, 0, 250);
+  }
 
-  police.addHeat = function (amount) {
-    police.heat = U.clamp(police.heat + amount, 0, 500);
-  };
+  function removeFromForce(car) {
+    var i = force.indexOf(car);
+    if (i >= 0) force.splice(i, 1);
+  }
 
-  police.setHeat = function (v) {
-    police.heat = U.clamp(v, 0, 500);
-    if (police.heat <= 0) police.standDown();
-  };
-
-  police.removeFromForce = function (car) {
-    var i = police.force.indexOf(car);
-    if (i >= 0) police.force.splice(i, 1);
-  };
-
-  // Find a spawn point 52–85 m from the player on a road. Sampling
-  // first; the constructive fallback (nearest avenue, ~62 m along it)
-  // guarantees a point, so a cruiser always answers.
-  police.findSpawnPoint = function (px, pz) {
-    var world = CVH.world;
+  function roadPointNear(x, z, minD, maxD) {
+    // sample up to 40 road points in the annulus; return the best found
+    var best = null, bestScore = -1;
     for (var i = 0; i < 40; i++) {
-      var p = world.randomRoadPoint(Math.random);
-      var d = U.dist(p.x, p.z, px, pz);
-      if (d >= 52 && d <= 85 && world.isLand(p.x, p.z)) return p;
+      var onAvenue = rng() < 0.5;
+      var line = onAvenue ? W.VX[Math.floor(rng() * W.VX.length)] : W.HZ[Math.floor(rng() * W.HZ.length)];
+      var along = (onAvenue ? z : x) + (rng() < 0.5 ? -1 : 1) * (minD + rng() * (maxD - minD + 30));
+      along = U.clamp(along, -250, 250);
+      var px = onAvenue ? line : along;
+      var pz = onAvenue ? along : line;
+      var d = U.dist(px, pz, x, z);
+      if (d >= minD && d <= maxD) return { x: px, z: pz };
+      var score = -Math.abs(d - (minD + maxD) / 2);
+      if (score > bestScore) { bestScore = score; best = { x: px, z: pz }; }
     }
-    // fallback: nearest avenue to the player, ~62 m east or west along it
-    var bestZ = world.avenues[0], bestD = 1e9;
-    for (var j = 0; j < world.avenues.length; j++) {
-      var dd = Math.abs(world.avenues[j] - pz);
-      if (dd < bestD) { bestD = dd; bestZ = world.avenues[j]; }
-    }
-    var dir = px < 0 ? 1 : -1;
-    var fx = U.clamp(px + dir * 62, -238, 238);
-    return { x: fx, z: bestZ, avenue: true };
-  };
+    return best;
+  }
 
-  police.spawnCruiser = function (px, pz) {
-    var p = police.findSpawnPoint(px, pz);
-    var yaw = U.headingOf(px - p.x, pz - p.z);
-    var car = CVH.vehicles.spawn('sedan', p.x, p.z, yaw, 'police', 0xf2f4f6);
-    police.force.push(car);
+  function spawnCruiser(px, pz) {
+    var spot = roadPointNear(px, pz, 52, 85);
+    if (!spot) {
+      // constructive fallback: nearest avenue, ~62 m along it from the player
+      var nearest = W.VX[0], nd = 1e9;
+      W.VX.forEach(function (x) { var d = Math.abs(x - px); if (d < nd) { nd = d; nearest = x; } });
+      spot = { x: nearest, z: U.clamp(pz + (pz >= 0 ? -62 : 62), -250, 250) };
+    }
+    var heading = Math.atan2(px - spot.x, pz - spot.z);
+    var car = CVH.vehicles.spawnCar('police', spot.x, spot.z, heading, 'police', 0xf0f0f0);
+    force.push(car);
     return car;
-  };
+  }
 
-  // Heat hit zero: cruisers stand down. Wrecks stay wrecks; intact
-  // cruisers peel off and join traffic.
-  police.standDown = function () {
-    for (var i = police.force.length - 1; i >= 0; i--) {
-      var car = police.force[i];
-      police.force.splice(i, 1);
-      if (car.driver !== 'police') continue;
-      if (car.dead) {
+  function standDown() {
+    // heat gone: dead cruisers become wrecks where they sit; intact cruisers
+    // peel off and join traffic. A wreck is NEVER revived as traffic.
+    force.slice().forEach(function (car) {
+      removeFromForce(car);
+      if (car.dead || car.hp <= 0) {
         car.driver = 'wreck';
+        car.speed = 0;
       } else {
         car.driver = 'traffic';
-        CVH.vehicles.traffic.push(car);
+        // peel off: join the nearest road's traffic in place — the traffic
+        // update eases the car onto the lane line from where it sits.
+        var nav = W.VX[0], ndv = 1e9;
+        W.VX.forEach(function (x) { var d = Math.abs(x - car.x); if (d < ndv) { ndv = d; nav = x; } });
+        var nah = W.HZ[0], ndh = 1e9;
+        W.HZ.forEach(function (z) { var d = Math.abs(z - car.z); if (d < ndh) { ndh = d; nah = z; } });
+        var f = U.fwd(car.heading);
+        if (ndv <= ndh) car.lane = { axis: 'V', line: nav, dir: f.z >= 0 ? 1 : -1 };
+        else car.lane = { axis: 'H', line: nah, dir: f.x >= 0 ? 1 : -1 };
+        car.speed = 6;
       }
-    }
-    police.bust = 0;
-  };
+      CVH.vehicles.syncMesh(car);
+    });
+    bust = 0;
+  }
 
-  police.clearAll = function () {
-    police.heat = 0;
-    police.standDown();
-  };
-
-  police.update = function (dt, player) {
-    var playerPos = player.pos();
-    var stars = police.stars();
-    police.spawnCooldown -= dt;
-    police.flashPhase += dt * 9;
-
-    // Desired force size follows the stars.
-    var live = 0;
-    for (var i = 0; i < police.force.length; i++) if (!police.force[i].dead) live++;
-    if (stars > 0 && live < stars && police.spawnCooldown <= 0) {
-      police.spawnCruiser(playerPos.x, playerPos.z);
-      police.spawnCooldown = 2.2;
-    }
-
-    // Contact check: any live cruiser within 115 m?
+  function update(dt, P) {
+    var st = stars();
+    // heat decay is gated on contact: only when no live cruiser within 115 m
     var contact = false;
-    for (i = 0; i < police.force.length; i++) {
-      var c = police.force[i];
-      if (!c.dead && U.dist(c.x, c.z, playerPos.x, playerPos.z) < 115) { contact = true; break; }
-    }
-    if (police.heat > 0 && !contact) {
-      police.heat = Math.max(0, police.heat - 5 * dt);
-      if (police.heat <= 0) police.standDown();
+    force.forEach(function (c) {
+      if (!c.dead && U.dist(c.x, c.z, P.x, P.z) < 115) contact = true;
+    });
+    if (!contact && heat > 0) {
+      heat = Math.max(0, heat - dt * 4.5);
+      if (heat === 0) standDown();
     }
 
-    // Pursuit steering — only genuine on-duty cruisers.
-    var bustPressure = 0;
-    for (i = 0; i < police.force.length; i++) {
-      var car = police.force[i];
-      if (car.driver !== 'police' || car.dead) continue;
-      var dx = playerPos.x - car.x, dz = playerPos.z - car.z;
+    // spawns: desired force size follows the stars
+    spawnTimer -= dt;
+    var desired = st;
+    if (st > 0 && force.length < desired && spawnTimer <= 0) {
+      spawnCruiser(P.x, P.z);
+      spawnTimer = 1.6;
+    }
+    // prune: cruisers stolen/dead/far away leave the force list
+    for (var i = force.length - 1; i >= 0; i--) {
+      var c = force[i];
+      if (c.driver !== 'police') { force.splice(i, 1); continue; }
+      if (c.dead) { force.splice(i, 1); CVH.vehicles.damage(c, 0); continue; }
+      if (U.dist(c.x, c.z, P.x, P.z) > 300) {
+        force.splice(i, 1);
+        CVH.vehicles.removeCar(c);
+      }
+    }
+
+    // pursuit: ONLY cars whose driver is 'police' are steered
+    force.forEach(function (car) {
+      if (car.driver !== 'police' || car.dead) return;
+      var dx = P.x - car.x, dz = P.z - car.z;
       var d = Math.sqrt(dx * dx + dz * dz);
-      var want = U.headingOf(dx, dz);
-      var diff = U.angDiff(want, car.yaw);
-      var steer = U.clamp(diff * 1.8, -1, 1);
-      var throttle = d > 10 ? 1.0 : 0.45;
-      if (Math.abs(diff) > 2.4) throttle = -0.5; // badly angled: back up
-      CVH.vehicles.driveStep(car, dt, throttle, steer);
-      // flashing light bar
-      var lm = car.mesh.userData.lightMats;
-      if (lm) {
-        var on = Math.sin(police.flashPhase) > 0;
-        lm.red.color.setHex(on ? 0xff2a2a : 0x571010);
-        lm.blue.color.setHex(on ? 0x101a57 : 0x2a5cff);
-      }
-      // bust pressure: close + player slow
-      var playerSpeed = Math.abs(player.speedScalar());
-      if (d < 8 && playerSpeed < 2.2) bustPressure = 1;
-      // ram damage
-      if (d < 3.4 && Math.abs(car.speed) > 6 && player.driving) {
-        CVH.vehicles.damage(player.car, 4);
-        car.speed *= 0.5;
-      }
+      var targetHeading = Math.atan2(dx, dz);
+      var dh = U.wrapAngle(targetHeading - car.heading);
+      var steer = U.clamp(dh * 1.6, -1, 1);
+      var throttle = d > 7 ? 1 : 0.35;
+      if (Math.abs(dh) > 2.4 && d < 12) throttle = -0.6; // reverse out of a jam
+      CVH.vehicles.driveStep(car, throttle, steer, dt);
+    });
+
+    // bust meter: a live cruiser close while the player is slow / on foot
+    var busting = false;
+    if (st > 0 && !P.dead) {
+      force.forEach(function (car) {
+        if (car.dead) return;
+        var d = U.dist(car.x, car.z, P.x, P.z);
+        if (d < 7.5 && P.speedNow < 2.2) busting = true;
+      });
     }
-    if (bustPressure) police.bust = Math.min(1, police.bust + dt / 2.6);
-    else police.bust = Math.max(0, police.bust - dt / 1.8);
+    if (busting) {
+      bust += dt * 26;
+      if (bust >= 100) {
+        bust = 0;
+        if (CVH.onBusted) CVH.onBusted();
+      }
+    } else {
+      bust = Math.max(0, bust - dt * 18);
+    }
 
-    if (CVH.audio) CVH.audio.siren(stars > 0 && live > 0);
+    CVH.audio.updateSiren(dt, st > 0 && contact);
+  }
+
+  function setHeat(v) {
+    heat = U.clamp(v, 0, 250);
+    if (heat === 0) standDown();
+  }
+
+  CVH.police = {
+    get heat() { return heat; },
+    get stars() { return stars(); },
+    get bust() { return bust; },
+    force: force,
+    addHeat: addHeat,
+    setHeat: setHeat,
+    removeFromForce: removeFromForce,
+    spawnCruiser: spawnCruiser,
+    standDown: standDown,
+    update: update
   };
-
-  CVH.police = police;
 })();

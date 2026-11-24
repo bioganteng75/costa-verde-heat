@@ -1,82 +1,52 @@
-// input.js — keyboard + mouse state and pointer-lock bookkeeping.
-// Losing pointer lock while playing auto-pauses (wired in main.js via
-// input.onLockLost). The playtest drives input.keys directly.
+// input.js — keyboard state, edge presses, pointer-lock mouse look.
 (function () {
   'use strict';
-  var CVH = window.CVH;
 
-  var input = {
-    keys: {},            // KeyboardEvent.code -> bool
-    locked: false,
-    mouseDX: 0,
-    mouseDY: 0,
-    firing: false,       // left mouse held
-    onLockLost: null,    // set by main.js
-    onPauseKey: null,    // set by main.js (Esc / P)
-    onMuteKey: null,     // set by main.js (M)
-    onInteractKey: null, // set by main.js (E)
-    onEnterKey: null,
+  var keys = {};
+  var pressedSet = {};
+  var mouseDX = 0;
+  var mouseDY = 0;
+  var locked = false;
 
-    init: function (domElement) {
-      window.addEventListener('keydown', function (ev) {
-        if (ev.code === 'Space') ev.preventDefault();
-        if (!input.keys[ev.code]) {
-          if (ev.code === 'KeyM' && input.onMuteKey) input.onMuteKey();
-          if ((ev.code === 'Escape' || ev.code === 'KeyP') && input.onPauseKey) input.onPauseKey();
-          if (ev.code === 'KeyE' && input.onInteractKey) input.onInteractKey();
-          if (ev.code === 'KeyF' && input.onEnterKey) input.onEnterKey();
-        }
-        input.keys[ev.code] = true;
-      });
-      window.addEventListener('keyup', function (ev) {
-        input.keys[ev.code] = false;
-      });
-      window.addEventListener('blur', function () {
-        input.keys = {};
-        input.firing = false;
-      });
+  window.addEventListener('keydown', function (e) {
+    if (!keys[e.code]) pressedSet[e.code] = true;
+    keys[e.code] = true;
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].indexOf(e.code) >= 0) e.preventDefault();
+  });
+  window.addEventListener('keyup', function (e) { keys[e.code] = false; });
+  window.addEventListener('blur', function () { keys = {}; });
 
-      document.addEventListener('mousemove', function (ev) {
-        if (input.locked) {
-          input.mouseDX += ev.movementX || 0;
-          input.mouseDY += ev.movementY || 0;
-        }
-      });
-      document.addEventListener('mousedown', function (ev) {
-        if (ev.button === 0) input.firing = true;
-      });
-      document.addEventListener('mouseup', function (ev) {
-        if (ev.button === 0) input.firing = false;
-      });
+  document.addEventListener('pointerlockchange', function () {
+    var was = locked;
+    locked = !!document.pointerLockElement;
+    if (was && !locked && CVH.onLockLost) CVH.onLockLost();
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (!locked) return;
+    mouseDX += e.movementX || 0;
+    mouseDY += e.movementY || 0;
+  });
 
-      document.addEventListener('pointerlockchange', function () {
-        var wasLocked = input.locked;
-        input.locked = document.pointerLockElement === domElement;
-        if (wasLocked && !input.locked && input.onLockLost) input.onLockLost();
-      });
+  CVH.input = {
+    down: function (code) { return !!keys[code]; },
+    pressed: function (code) { return !!pressedSet[code]; },
+    // test hook: simulate a key state
+    setKey: function (code, isDown) {
+      if (isDown && !keys[code]) pressedSet[code] = true;
+      keys[code] = !!isDown;
     },
-
-    requestLock: function (domElement) {
-      try {
-        var p = domElement.requestPointerLock && domElement.requestPointerLock();
-        if (p && p.catch) p.catch(function () { /* user gesture needed */ });
-      } catch (e) { /* ignored */ }
-    },
-
-    exitLock: function () {
-      try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) { /* ignored */ }
-    },
-
-    // Consume the accumulated mouse delta (called once per frame).
-    takeMouseDelta: function () {
-      var d = { x: input.mouseDX, y: input.mouseDY };
-      input.mouseDX = 0;
-      input.mouseDY = 0;
+    endFrame: function () { pressedSet = {}; mouseDX = 0; mouseDY = 0; },
+    consumeMouse: function () {
+      var d = { dx: mouseDX, dy: mouseDY };
+      mouseDX = 0; mouseDY = 0;
       return d;
     },
-
-    down: function (code) { return !!input.keys[code]; }
+    get locked() { return locked; },
+    lock: function (el) {
+      try { if (el && el.requestPointerLock) el.requestPointerLock(); } catch (e) {}
+    },
+    unlock: function () {
+      try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {}
+    }
   };
-
-  CVH.input = input;
 })();

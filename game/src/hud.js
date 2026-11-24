@@ -1,167 +1,128 @@
-// hud.js — DOM HUD (cash, stars, health, weapon, speedo, banner, toast)
-// and the 2D minimap. The minimap player marker is a TRIANGLE rotated
-// by the live heading — character facing on foot, vehicle yaw while
-// driving — recomputed on every draw, and the drawn angle is published
-// to CVH.debug.lastArrowAngle for the playtest.
+// hud.js — DOM HUD (cash, hp, stars, heat, speed, objective banner, toasts)
+// and the 2D minimap. The player marker is a TRIANGLE rotated by the live
+// heading on every redraw; the drawn angle is published to
+// CVH.debug.lastArrowAngle for verification.
 (function () {
   'use strict';
-  var CVH = window.CVH;
   var U = CVH.util;
+  var W = CVH.world;
 
   var el = {};
   var toastTimer = null;
 
-  var hud = {
-    el: el,
+  function grab() {
+    ['hudCash', 'hudHpFill', 'hudStars', 'hudHeatFill', 'hudSpeed', 'hudWeapon',
+     'bannerText', 'bannerDist', 'toast', 'minimap', 'bustWrap', 'bustFill'].forEach(function (id) {
+      el[id] = document.getElementById(id);
+    });
+  }
 
-    init: function () {
-      ['cash', 'stars', 'healthFill', 'weapon', 'speedo', 'banner', 'bannerText', 'toast',
-       'minimap', 'soundState', 'bustFill', 'bustWrap', 'objective', 'jobTitle'].forEach(function (id) {
-        el[id] = document.getElementById(id);
-      });
-      hud.syncSoundLabel();
-    },
+  function toast(msg, ms) {
+    if (!el.toast) return;
+    el.toast.textContent = msg;
+    el.toast.style.opacity = '1';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.toast.style.opacity = '0'; }, ms || 2600);
+  }
 
-    // The one place the SOUND label is written; audio.toggleMute and
-    // audio.setMuted both call this, so every toggle path stays in sync.
-    syncSoundLabel: function () {
-      var s = document.getElementById('soundState');
-      if (s) s.textContent = CVH.audio && CVH.audio.muted ? 'OFF' : 'ON';
-      var b = document.getElementById('btnSound');
-      if (b) b.textContent = 'SOUND: ' + (CVH.audio && CVH.audio.muted ? 'OFF' : 'ON');
-    },
+  function syncSoundLabel() {
+    var label = CVH.audio.muted ? 'OFF' : 'ON';
+    var nodes = document.querySelectorAll('.soundState');
+    for (var i = 0; i < nodes.length; i++) nodes[i].textContent = label;
+  }
 
-    toast: function (msg, ms) {
-      if (!el.toast) return;
-      el.toast.textContent = msg;
-      el.toast.style.opacity = '1';
-      if (toastTimer) clearTimeout(toastTimer);
-      toastTimer = setTimeout(function () { el.toast.style.opacity = '0'; }, ms || 3400);
-    },
-
-    update: function () {
-      var player = CVH.player;
-      if (el.cash) el.cash.textContent = '$' + player.cash;
-      if (el.stars) {
-        var st = CVH.police.stars();
-        var s = '';
-        for (var i = 0; i < 5; i++) s += i < st ? '★' : '☆';
-        el.stars.textContent = s;
-        el.stars.style.color = st > 0 ? '#ffd34f' : '#8a93a3';
-      }
-      if (el.healthFill) el.healthFill.style.width = U.clamp(player.health, 0, 100) + '%';
-      if (el.weapon) {
-        var w = player.weapon;
-        el.weapon.textContent = w === 'fist' ? 'FISTS' :
-          w === 'pistol' ? 'PISTOL · ' + player.ammoPistol : 'SMG · ' + player.ammoSmg;
-      }
-      if (el.speedo) {
-        if (player.driving && player.car) {
-          el.speedo.style.display = 'block';
-          el.speedo.textContent = Math.round(Math.abs(player.car.speed) * 3.6) + ' km/h';
-        } else el.speedo.style.display = 'none';
-      }
-      if (el.bustWrap) {
-        var bust = CVH.police.bust;
-        el.bustWrap.style.display = bust > 0.02 ? 'block' : 'none';
-        if (el.bustFill) el.bustFill.style.width = Math.round(bust * 100) + '%';
-      }
-      // objective banner
-      var t = CVH.missions.targetPoint();
-      if (el.banner && el.bannerText) {
-        if (t) {
-          el.banner.style.display = 'block';
-          var pos = player.pos();
-          var d = Math.round(U.dist(pos.x, pos.z, t.x, t.z));
-          var txt = t.label + '  ·  ' + d + ' m';
-          if (t.timer > 0) txt += '  ·  ' + Math.ceil(t.timer) + 's';
-          if (t.kind === 'job') {
-            var job = CVH.missions.JOBS[CVH.missions.active];
-            if (job) txt = job.title.replace(/^Job \d+ — /, '') + ': ' + txt;
-          }
-          el.bannerText.textContent = txt;
-        } else {
-          el.banner.style.display = 'none';
-        }
-      }
-      hud.drawMinimap();
-    },
-
-    // ------------------------------------------------------------
-    // Minimap: north-up. World x -> canvas x, world z -> canvas y.
-    // The player arrow is a triangle whose tip is the facing vector
-    // rotated into canvas space: drawnAngle = atan2(f.x, -f.z).
-    // ------------------------------------------------------------
-    drawMinimap: function () {
-      var cv = el.minimap;
-      if (!cv) return;
-      var g = cv.getContext('2d');
-      var W = cv.width, H = cv.height;
-      var world = CVH.world;
-      var scale = W / 560;
-      function mx(x) { return (x + 260) * scale; }
-      function mz(z) { return (z + 260) * scale; }
-
-      g.fillStyle = '#3d5a34';
-      g.fillRect(0, 0, W, H);
-      // water + sand
-      g.fillStyle = '#2e6f9e';
-      g.fillRect(mx(world.waterX), 0, W - mx(world.waterX), H);
-      g.fillStyle = '#e3cf9e';
-      g.fillRect(mx(228), 0, mx(world.waterX) - mx(228), H);
-      // roads
-      g.fillStyle = '#3a3d44';
-      world.avenues.forEach(function (z) { g.fillRect(0, mz(z) - 7 * scale, W, 14 * scale); });
-      world.streets.forEach(function (x) { g.fillRect(mx(x) - 7 * scale, 0, 14 * scale, H); });
-      // pier
-      g.fillStyle = '#8a6f4d';
-      g.fillRect(mx(world.pier.minX), mz(world.pier.minZ), (world.pier.maxX - world.pier.minX) * scale, (world.pier.maxZ - world.pier.minZ) * scale);
-
-      var player = CVH.player;
-      var pos = player.pos();
-
-      function blip(x, z, color, r) {
-        g.fillStyle = color;
-        g.beginPath();
-        g.arc(mx(x), mz(z), r || 3, 0, Math.PI * 2);
-        g.fill();
-      }
-      // objective + services
-      var t = CVH.missions.targetPoint();
-      if (t) blip(t.x, t.z, t.kind === 'taxi' ? '#4fc3ff' : '#ffd34f', 4);
-      blip(world.porch.x, world.porch.z, '#ff9d5c', 3);
-      blip(world.payNSpray.x, world.payNSpray.z, '#3fd97e', 3);
-      // police
-      CVH.police.force.forEach(function (c) { if (!c.dead) blip(c.x, c.z, '#4f8dff', 3); });
-      // traffic
-      g.fillStyle = '#c8ccd4';
-      CVH.vehicles.traffic.forEach(function (c) {
-        g.fillRect(mx(c.x) - 1.5, mz(c.z) - 1.5, 3, 3);
-      });
-
-      // --- the rotating player arrow ---
-      var heading = player.driving && player.car ? player.car.yaw : player.heading;
-      var f = U.facing(heading);
-      var drawn = Math.atan2(f.x, -f.z);
-      CVH.debug.lastArrowAngle = drawn;
-      var cx = mx(pos.x), cy = mz(pos.z);
-      g.save();
-      g.translate(cx, cy);
-      g.rotate(drawn);
-      g.fillStyle = '#ffffff';
-      g.strokeStyle = '#14161f';
-      g.lineWidth = 1.4;
-      g.beginPath();
-      g.moveTo(0, -8);      // tip (facing)
-      g.lineTo(5.5, 6);
-      g.lineTo(0, 3.4);
-      g.lineTo(-5.5, 6);
-      g.closePath();
-      g.fill();
-      g.stroke();
-      g.restore();
+  function update() {
+    var P = CVH.player.data;
+    if (el.hudCash) el.hudCash.textContent = '$' + P.cash;
+    if (el.hudHpFill) el.hudHpFill.style.width = Math.max(0, P.hp) + '%';
+    if (el.hudStars) {
+      var s = '';
+      for (var i = 0; i < 5; i++) s += i < CVH.police.stars ? '★' : '☆';
+      el.hudStars.textContent = s;
     }
-  };
+    if (el.hudHeatFill) el.hudHeatFill.style.width = (CVH.police.heat / 250 * 100) + '%';
+    if (el.hudSpeed) el.hudSpeed.textContent = P.driving ? Math.round(Math.abs(P.driving.speed) * 3.6) + ' km/h' : '';
+    if (el.hudWeapon) el.hudWeapon.textContent = P.weapon === 'fist' ? 'FISTS' : P.weapon.toUpperCase();
+    if (el.bustWrap) {
+      var b = CVH.police.bust;
+      el.bustWrap.style.display = b > 2 ? 'block' : 'none';
+      if (el.bustFill) el.bustFill.style.width = b + '%';
+    }
+    var obj = CVH.missions.currentObjective();
+    if (el.bannerText) {
+      var txt = obj.label;
+      if (obj.job) txt = obj.job + ' — ' + txt;
+      if (obj.timer !== null && obj.timer !== undefined) txt += ' · ' + Math.ceil(obj.timer) + 's';
+      el.bannerText.textContent = txt;
+    }
+    if (el.bannerDist) {
+      if (obj.x !== null && obj.x !== undefined) {
+        var d = Math.round(U.dist(P.x, P.z, obj.x, obj.z));
+        el.bannerDist.textContent = d + ' m';
+      } else el.bannerDist.textContent = '';
+    }
+    drawMinimap(P);
+  }
 
-  CVH.hud = hud;
+  function drawMinimap(P) {
+    var cv = el.minimap;
+    if (!cv) return;
+    var ctx = cv.getContext('2d');
+    var S = cv.width; // 190
+    var EXT = 580, OFF = 290;
+    function mx(x) { return (x + OFF) / EXT * S; }
+    function mz(z) { return (z + OFF) / EXT * S; }
+    ctx.fillStyle = '#20303c';
+    ctx.fillRect(0, 0, S, S);
+    // water + sand
+    ctx.fillStyle = '#2e6f9e';
+    ctx.fillRect(mx(W.WATER_X), 0, S - mx(W.WATER_X), S);
+    ctx.fillStyle = '#e3cf9e';
+    ctx.fillRect(mx(W.SAND_X), 0, mx(W.WATER_X) - mx(W.SAND_X), S);
+    // roads
+    ctx.strokeStyle = '#596068';
+    ctx.lineWidth = Math.max(1, 14 / EXT * S);
+    W.VX.forEach(function (x) { ctx.beginPath(); ctx.moveTo(mx(x), 0); ctx.lineTo(mx(x), S); ctx.stroke(); });
+    W.HZ.forEach(function (z) { ctx.beginPath(); ctx.moveTo(0, mz(z)); ctx.lineTo(S, mz(z)); ctx.stroke(); });
+    // packages
+    ctx.fillStyle = '#51e06a';
+    W.PACKAGES.forEach(function (pk) { ctx.fillRect(mx(pk.x) - 1.5, mz(pk.z) - 1.5, 3, 3); });
+    // objective blip
+    var obj = CVH.missions.currentObjective();
+    if (obj.x !== null && obj.x !== undefined) {
+      ctx.fillStyle = '#ffc93c';
+      ctx.beginPath(); ctx.arc(mx(obj.x), mz(obj.z), 3.6, 0, Math.PI * 2); ctx.fill();
+    }
+    // police blips
+    CVH.vehicles.cars.forEach(function (c) {
+      if (c.type !== 'police' || c.dead) return;
+      ctx.fillStyle = (Math.floor(performance.now() / 300) % 2) ? '#ff5252' : '#4d7cff';
+      ctx.beginPath(); ctx.arc(mx(c.x), mz(c.z), 2.6, 0, Math.PI * 2); ctx.fill();
+    });
+    // player arrow — rotated by the LIVE heading every redraw
+    var f = U.fwd(P.heading);
+    var ang = Math.atan2(f.x, -f.z);
+    if (!CVH.debug) CVH.debug = {};
+    CVH.debug.lastArrowAngle = ang;
+    ctx.save();
+    ctx.translate(mx(P.x), mz(P.z));
+    ctx.rotate(ang);
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#10131a';
+    ctx.beginPath();
+    ctx.moveTo(0, -6.5);
+    ctx.lineTo(4.4, 5);
+    ctx.lineTo(0, 2.4);
+    ctx.lineTo(-4.4, 5);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  CVH.hud = {
+    grab: grab, toast: toast, update: update,
+    syncSoundLabel: syncSoundLabel, drawMinimap: drawMinimap,
+    get el() { return el; }
+  };
+  if (!CVH.debug) CVH.debug = {};
 })();

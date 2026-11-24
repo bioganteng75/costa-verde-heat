@@ -1,350 +1,354 @@
-// missions.js — Marisol Vega's six story jobs, taxi work, cash packages,
-// weapon pickups, and the ONE cleanup path: missions.cancel().
-// cancel() removes the parked mission car, makes the taxi passenger
-// visible again and clears all job/taxi state. New game, restart,
-// BUSTED and WASTED all funnel through it.
+// missions.js — Marisol Vega's 6 story jobs, taxi work, world pickups.
+// ONE cleanup path: missions.cancel() is called by new game, restart,
+// busted and wasted. It removes any parked mission car, restores the taxi
+// passenger's visibility, and clears all job/taxi state.
 (function () {
   'use strict';
-  var CVH = window.CVH;
   var U = CVH.util;
+  var W = CVH.world;
 
   var JOBS = [
     {
-      title: 'Job 1 — First Run', reward: 300,
+      name: 'Beach Run', payout: 150,
       stages: [
-        { type: 'pickup', x: 196, z: 47, label: 'Pick up the package at the beachfront kiosk' },
-        { type: 'deliver', x: 228, z: 40, label: 'Deliver it to the beach, by the pier' }
+        { type: 'go', x: 8, z: 214, r: 6, label: 'Pick up the package at Marisol’s porch' },
+        { type: 'go', x: 228, z: 40, r: 7, label: 'Deliver the package to the beach' }
       ]
     },
     {
-      title: 'Job 2 — Hot Wheels', reward: 450,
+      name: 'Hot Coupe', payout: 220, carAt: { x: -150, z: -58 },
       stages: [
-        { type: 'steal', x: 120, z: 47, label: 'Steal the coupe on the east avenue', carType: 'coupe' },
-        { type: 'deliverCar', x: -120, z: -33, label: 'Deliver the coupe to the chop shop' }
+        { type: 'steal', x: -150, z: -58, r: 6, label: 'Steal the coupe on the west avenue' },
+        { type: 'go', x: 150, z: 108, r: 8, label: 'Deliver the coupe across town' }
       ]
     },
     {
-      title: 'Job 3 — Beach Money', reward: 500,
+      name: 'Downtown Dash', payout: 260, timed: 80,
       stages: [
-        { type: 'pickup', x: 232, z: -80, label: 'Collect the cash at the marina' },
-        { type: 'deliver', x: 12, z: 47, label: 'Bring it back to Marisol\'s porch' }
+        { type: 'go', x: 0, z: -150, r: 7, label: 'Grab the briefcase uptown' },
+        { type: 'go', x: 50, z: -8, r: 7, label: 'Deliver downtown — fast!' }
       ]
     },
     {
-      title: 'Job 4 — Downtown Dash', reward: 650,
+      name: 'Marina Deal', payout: 320,
       stages: [
-        { type: 'pickup', x: -200, z: 120, label: 'Pick up the briefcase uptown' },
-        { type: 'deliver', x: 40, z: -40, label: 'Deliver downtown — fast!', time: 75 }
+        { type: 'go', x: 238, z: -60, r: 7, label: 'Meet the boat crew at the marina' },
+        { type: 'go', x: -200, z: 150, r: 8, label: 'Lose the heat and reach the safe corner', heat: 100 }
       ]
     },
     {
-      title: 'Job 5 — Heat Run', reward: 800,
+      name: 'Mercy Run', payout: 380,
       stages: [
-        { type: 'pickup', x: 200, z: 200, label: 'Grab the stash in the south-east', heat: 200 },
-        { type: 'deliver', x: 228, z: -160, label: 'Lose the heat and reach the south beach', time: 95 }
+        { type: 'go', x: 110, z: -90, r: 7, label: 'Pick up the medic bag at the hospital' },
+        { type: 'go', x: -90, z: 60, r: 7, label: 'Drop it near the police station' },
+        { type: 'go', x: 8, z: 214, r: 7, label: 'Report back to Marisol' }
       ]
     },
     {
-      title: 'Job 6 — Final Score', reward: 1200,
+      name: 'The Final Score', payout: 500,
       stages: [
-        { type: 'pickup', x: -40, z: -200, label: 'Pick up the last package up north' },
-        { type: 'deliver', x: 262, z: 40, label: 'Take it to the end of the pier', time: 100 }
+        { type: 'go', x: 200, z: -200, r: 8, label: 'Take the score at the north-east corner' },
+        { type: 'go', x: 266, z: 44, r: 6, label: 'Bring it to the end of the pier' }
       ]
     }
   ];
 
-  var TAXI_PICKUPS = [[0, 40], [120, -40], [-120, 120], [200, 40], [-200, -120], [40, 200]];
-  var TAXI_DROPOFFS = [[40, -120], [-40, 40], [160, 120], [-160, -40], [228, 80], [0, -200]];
-  var PACKAGES = [
-    [0, 40], [-120, -40], [200, -120], [228, 120], [262, 40], [-200, 200], [120, 120],
-    [40, -200], [-40, 200], [228, -200], [60, 47], [-160, -33], [180, 33], [90, -113]
-  ];
+  var jobIndex = 0;          // next job to offer
+  var active = null;         // { def, stage, timer }
+  var missionCar = null;
+  var taxi = null;           // { ped, phase:'pickup'|'deliver', dest }
+  var packagesTaken = {};
+  var weaponsTaken = {};
+  var standCd = {};
+  var pillar = null;
 
-  var missions = {
-    jobsDone: 0,
-    active: null,       // job index or null
-    stage: 0,
-    timer: 0,
-    missionCar: null,
-    taxi: null,         // {stage:'pickup'|'dropoff', x, z, passenger}
-    packagesFound: {},
-    packagesTaken: 0
-  };
-
-  var marker = null;       // gold pillar mesh
-  var packageMeshes = [];
-  var pickupMeshes = [];
-  var passengerMesh = null;
-
-  missions.JOBS = JOBS;
-
-  missions.init = function (scene) {
-    // register every objective point for the audit
-    JOBS.forEach(function (job, ji) {
-      job.stages.forEach(function (st, si) {
-        CVH.world.addObjective('job' + (ji + 1) + '-stage' + (si + 1), st.x, st.z);
-      });
+  function auditPoints() {
+    var pts = [];
+    JOBS.forEach(function (j, ji) {
+      j.stages.forEach(function (s, si) { pts.push({ x: s.x, z: s.z, name: 'job' + (ji + 1) + 'stage' + si }); });
     });
-    TAXI_PICKUPS.forEach(function (p, i) { CVH.world.addObjective('taxi-pickup-' + (i + 1), p[0], p[1]); });
-    TAXI_DROPOFFS.forEach(function (p, i) { CVH.world.addObjective('taxi-dropoff-' + (i + 1), p[0], p[1]); });
-    PACKAGES.forEach(function (p, i) { CVH.world.addObjective('package-' + (i + 1), p[0], p[1]); });
-    CVH.world.addObjective('pickup-pistol', 20, 47);
-    CVH.world.addObjective('pickup-smg', -200, -47);
+    return pts;
+  }
 
-    // reusable gold marker pillar
-    var geo = new THREE.CylinderGeometry(1.6, 1.6, 26, 12, 1, true);
-    var mat = new THREE.MeshBasicMaterial({ color: 0xffd34f, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthWrite: false });
-    marker = new THREE.Mesh(geo, mat);
-    marker.visible = false;
-    scene.add(marker);
+  function ensurePillar() {
+    if (pillar) return pillar;
+    var geo = new THREE.CylinderGeometry(1.3, 1.3, 34, 12, 1, true);
+    var mt = new THREE.MeshBasicMaterial({ color: 0xffc93c, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthWrite: false });
+    pillar = new THREE.Mesh(geo, mt);
+    pillar.position.y = 17;
+    pillar.visible = false;
+    W.scene.add(pillar);
+    return pillar;
+  }
+  function setMarker(x, z, color) {
+    var p = ensurePillar();
+    p.visible = true;
+    p.position.x = x; p.position.z = z;
+    if (color) p.material.color.setHex(color);
+  }
+  function hideMarker() { if (pillar) pillar.visible = false; }
 
-    // cash packages: spinning gold boxes
-    PACKAGES.forEach(function (p, i) {
-      var m = new THREE.Mesh(
-        new THREE.BoxGeometry(0.8, 0.8, 0.8),
-        new THREE.MeshLambertMaterial({ color: 0xffd34f, emissive: 0x8a6a10 })
-      );
-      m.position.set(p[0], 1.1, p[1]);
-      scene.add(m);
+  function startJob(i) {
+    if (active || i >= JOBS.length) return false;
+    var def = JOBS[i];
+    active = { def: def, stage: 0, timer: def.timed || 0 };
+    if (def.carAt) {
+      missionCar = CVH.vehicles.spawnCar('coupe', def.carAt.x, def.carAt.z, Math.PI, 'parked', 0xe0a52e);
+      missionCar.isMissionCar = true;
+      CVH.vehicles.syncMesh(missionCar);
+    }
+    if (CVH.hud) CVH.hud.toast('Job started: ' + def.name);
+    CVH.audio.click();
+    return true;
+  }
+
+  function completeJob() {
+    var P = CVH.player.data;
+    P.cash += active.def.payout;
+    CVH.audio.success();
+    if (CVH.hud) CVH.hud.toast(active.def.name + ' complete! +$' + active.def.payout);
+    if (CVH.fx) CVH.fx.burst(P.x, 2, P.z, 0xffc93c, 18);
+    active = null;
+    missionCar = null;
+    jobIndex++;
+    hideMarker();
+    if (jobIndex >= JOBS.length && CVH.onEnding) CVH.onEnding();
+  }
+
+  function failJob(reason) {
+    if (CVH.hud) CVH.hud.toast('Job failed: ' + reason);
+    CVH.audio.fail();
+    cancel();
+  }
+
+  // THE single cleanup path.
+  function cancel() {
+    if (missionCar) {
+      if (missionCar.driver !== 'player') CVH.vehicles.removeCar(missionCar);
+      missionCar = null;
+    }
+    if (taxi && taxi.ped) {
+      taxi.ped.visible = true;
+      taxi.ped.mesh.visible = true;
+      taxi.ped.isPassenger = false;
+    }
+    taxi = null;
+    active = null;
+    hideMarker();
+  }
+
+  function onSteal(car) {
+    if (active && active.def.carAt && car === missionCar && active.stage === 0) {
+      active.stage = 1;
+      if (CVH.police) CVH.police.addHeat(30);
+      if (CVH.hud) CVH.hud.toast('Coupe taken! The heat noticed.');
+    }
+  }
+
+  function startTaxi() {
+    if (taxi || active) return false;
+    var P = CVH.player.data;
+    var pt = null, bd = 1e9;
+    W.TAXI_POINTS.forEach(function (t) {
+      var d = U.dist(t.x, t.z, P.x, P.z);
+      if (d < bd) { bd = d; pt = t; }
+    });
+    var ped = null;
+    CVH.peds.list.forEach(function (p) {
+      if (!ped && p.visible && U.dist(p.x, p.z, pt.x, pt.z) < 26) ped = p;
+    });
+    if (!ped) return false;
+    ped.x = pt.x; ped.z = pt.z; ped.tx = pt.x; ped.tz = pt.z; ped.isPassenger = true;
+    taxi = { ped: ped, phase: 'pickup', dest: null, px: pt.x, pz: pt.z };
+    if (CVH.hud) CVH.hud.toast('Taxi fare waiting — pick them up in any car');
+    return true;
+  }
+
+  function update(dt) {
+    var P = CVH.player.data;
+    ensurePillar();
+
+    // ---- story jobs ----
+    if (!active && jobIndex < JOBS.length) {
+      var porch = W.PLACES.porch;
+      if (U.dist(P.x, P.z, porch.x, porch.z) < 5 && !P.driving) startJob(jobIndex);
+    }
+    if (active) {
+      var s = active.def.stages[active.stage];
+      setMarker(s.x, s.z, 0xffc93c);
+      if (active.def.timed) {
+        active.timer -= dt;
+        if (active.timer <= 0) { failJob('out of time'); return; }
+      }
+      if (s.type === 'go' && U.dist(P.x, P.z, s.x, s.z) < s.r) {
+        active.stage++;
+        if (active.stage >= active.def.stages.length) { completeJob(); }
+        else {
+          var ns = active.def.stages[active.stage];
+          if (ns.heat && CVH.police) CVH.police.setHeat(ns.heat);
+          CVH.audio.pickup();
+        }
+      }
+    } else if (taxi) {
+      // marker handled below
+    } else {
+      hideMarker();
+    }
+
+    // ---- taxi ----
+    if (!active && !taxi && P.driving && jobIndex >= 0) {
+      // a fare appears shortly after you get behind the wheel
+      if (!update._taxiCd || update._taxiCd <= 0) { if (startTaxi()) update._taxiCd = 20; }
+    }
+    if (update._taxiCd) update._taxiCd -= dt;
+    if (taxi) {
+      if (taxi.phase === 'pickup') {
+        setMarker(taxi.px, taxi.pz, 0xffe14d);
+        if (P.driving && U.dist(P.x, P.z, taxi.px, taxi.pz) < 6) {
+          taxi.ped.visible = false;
+          taxi.ped.mesh.visible = false;
+          var dest = W.TAXI_POINTS[Math.floor(Math.random() * W.TAXI_POINTS.length)];
+          var guard = 0;
+          while (dest.x === taxi.px && dest.z === taxi.pz && guard++ < 12) {
+            dest = W.TAXI_POINTS[Math.floor(Math.random() * W.TAXI_POINTS.length)];
+          }
+          taxi.dest = dest; taxi.phase = 'deliver';
+          if (CVH.hud) CVH.hud.toast('Fare aboard! Take them across town');
+          CVH.audio.pickup();
+        } else if (!P.driving && U.dist(P.x, P.z, taxi.px, taxi.pz) > 90) {
+          cancel(); // wandered off; fare gives up (also restores the ped)
+        }
+      } else if (taxi.phase === 'deliver') {
+        setMarker(taxi.dest.x, taxi.dest.z, 0xffe14d);
+        if (U.dist(P.x, P.z, taxi.dest.x, taxi.dest.z) < 7) {
+          var pay = 45 + Math.floor(Math.random() * 45);
+          P.cash += pay;
+          taxi.ped.x = taxi.dest.x; taxi.ped.z = taxi.dest.z;
+          taxi.ped.tx = taxi.dest.x; taxi.ped.tz = taxi.dest.z;
+          taxi.ped.visible = true; taxi.ped.mesh.visible = true; taxi.ped.isPassenger = false;
+          taxi = null;
+          hideMarker();
+          CVH.audio.cash();
+          if (CVH.hud) CVH.hud.toast('Fare delivered! +$' + pay);
+          update._taxiCd = 14;
+        }
+      }
+    }
+
+    updatePickups(dt, P);
+  }
+
+  var packageMeshes = [];
+  var weaponMeshes = [];
+  function buildPickups() {
+    W.PACKAGES.forEach(function (pk, i) {
+      var m = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.8),
+        new THREE.MeshBasicMaterial({ color: 0x51e06a }));
+      m.position.set(pk.x, 1.1, pk.z);
+      W.scene.add(m);
       packageMeshes.push(m);
     });
-
-    // weapon pickups
-    function weaponMesh(kind, x, z, color) {
-      var m = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.3, 0.4), new THREE.MeshLambertMaterial({ color: color, emissive: 0x222222 }));
-      m.position.set(x, 0.8, z);
-      scene.add(m);
-      pickupMeshes.push({ mesh: m, kind: kind, x: x, z: z });
-    }
-    weaponMesh('pistol', 20, 47, 0x3a3f46);
-    weaponMesh('smg', -200, -47, 0x22242c);
-
-    // taxi passenger figure (hidden until a fare is offered)
-    passengerMesh = CVH.world.makeHumanoid(0xf2c14e, 0x2c3e50, 0xf2c79b);
-    passengerMesh.visible = false;
-    scene.add(passengerMesh);
-  };
-
-  missions.currentStage = function () {
-    if (missions.active === null) return null;
-    return JOBS[missions.active].stages[missions.stage];
-  };
-
-  missions.startJob = function (idx) {
-    missions.active = idx;
-    missions.stage = 0;
-    missions.setupStage();
-    if (CVH.hud) CVH.hud.toast(JOBS[idx].title + ' — check the gold marker');
-    if (CVH.audio) CVH.audio.pickup();
-  };
-
-  missions.setupStage = function () {
-    var st = missions.currentStage();
-    missions.timer = st && st.time ? st.time : 0;
-    if (st && st.type === 'steal') {
-      missions.missionCar = CVH.vehicles.spawn(st.carType || 'coupe', st.x, st.z, -Math.PI / 2, 'mission', 0xe0a52c);
-    }
-    if (st && st.heat) CVH.police.addHeat(st.heat);
-  };
-
-  missions.completeJob = function () {
-    var job = JOBS[missions.active];
-    CVH.player.cash += job.reward;
-    missions.jobsDone = missions.active + 1;
-    missions.active = null;
-    missions.stage = 0;
-    missions.missionCar = null;
-    if (CVH.audio) CVH.audio.jobDone();
-    if (CVH.hud) CVH.hud.toast(job.title + ' complete  +$' + job.reward);
-    if (missions.jobsDone >= JOBS.length && CVH.onEnding) CVH.onEnding();
-  };
-
-  // THE cleanup path.
-  missions.cancel = function () {
-    if (missions.missionCar) {
-      CVH.vehicles.remove(missions.missionCar);
-      missions.missionCar = null;
-    }
-    if (missions.taxi && missions.taxi.passenger) {
-      missions.taxi.passenger.visible = true;
-    }
-    if (passengerMesh) passengerMesh.visible = false;
-    missions.taxi = null;
-    missions.active = null;
-    missions.stage = 0;
-    missions.timer = 0;
-    if (marker) marker.visible = false;
-  };
-
-  missions.resetProgress = function () {
-    missions.cancel();
-    missions.jobsDone = 0;
-    missions.packagesFound = {};
-    missions.packagesTaken = 0;
-    packageMeshes.forEach(function (m) { m.visible = true; });
-  };
-
-  // ---------------------------------------------------------------
-  // Taxi
-  // ---------------------------------------------------------------
-  function offerTaxi() {
-    var p = TAXI_PICKUPS[(Math.random() * TAXI_PICKUPS.length) | 0];
-    missions.taxi = { stage: 'pickup', x: p[0], z: p[1], passenger: null };
-    passengerMesh.visible = true;
-    passengerMesh.position.set(p[0], CVH.world.groundY(p[0], p[1]), p[1]);
-    if (CVH.hud) CVH.hud.toast('Taxi fare waiting — follow the blue marker');
+    W.WEAPONS.forEach(function (wp) {
+      var g = new THREE.Group();
+      var body = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, wp.kind === 'smg' ? 0.95 : 0.55),
+        new THREE.MeshLambertMaterial({ color: 0x2a2d33 }));
+      body.position.y = 1.1; g.add(body);
+      g.position.set(wp.x, 0, wp.z);
+      W.scene.add(g);
+      weaponMeshes.push(g);
+    });
   }
 
-  function updateTaxi(dt) {
-    var player = CVH.player;
-    if (missions.taxiEnabled === false) return;
-    if (!missions.taxi) {
-      if (player.driving && missions.active === null && Math.random() < dt * 0.05) offerTaxi();
-      return;
-    }
-    var t = missions.taxi;
-    var pos = player.pos();
-    if (t.stage === 'pickup') {
-      passengerMesh.position.set(t.x, CVH.world.groundY(t.x, t.z), t.z);
-      if (player.driving && U.dist(pos.x, pos.z, t.x, t.z) < 5 && Math.abs(player.car.speed) < 1.5) {
-        t.stage = 'dropoff';
-        t.passenger = passengerMesh;
-        passengerMesh.visible = false; // passenger climbs in
-        var d = TAXI_DROPOFFS[(Math.random() * TAXI_DROPOFFS.length) | 0];
-        t.x = d[0]; t.z = d[1];
-        if (CVH.audio) CVH.audio.door();
-        if (CVH.hud) CVH.hud.toast('Passenger aboard — drive to the blue marker');
-      }
-    } else {
-      if (player.driving && U.dist(pos.x, pos.z, t.x, t.z) < 6 && Math.abs(player.car.speed) < 1.5) {
-        var fare = 40 + ((Math.random() * 60) | 0);
-        player.cash += fare;
-        if (CVH.audio) CVH.audio.cash();
-        if (CVH.hud) CVH.hud.toast('Taxi fare paid  +$' + fare);
-        passengerMesh.visible = true;
-        passengerMesh.position.set(t.x, CVH.world.groundY(t.x, t.z), t.z);
-        missions.taxi = null;
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------
-  // Per-frame
-  // ---------------------------------------------------------------
-  missions.targetPoint = function () {
-    var st = missions.currentStage();
-    if (st) return { x: st.x, z: st.z, kind: 'job', label: st.label, timer: missions.timer };
-    if (missions.taxi) return { x: missions.taxi.x, z: missions.taxi.z, kind: 'taxi', label: missions.taxi.stage === 'pickup' ? 'Pick up the taxi fare' : 'Drop off your passenger', timer: 0 };
-    if (missions.jobsDone < JOBS.length) return { x: CVH.world.porch.x, z: CVH.world.porch.z, kind: 'porch', label: 'See Marisol Vega for work', timer: 0 };
-    return null;
-  };
-
-  missions.update = function (dt) {
-    var player = CVH.player;
-    var pos = player.pos();
-    var t = missions.targetPoint();
-
-    // marker pillar follows the current target
-    if (t && marker) {
-      marker.visible = true;
-      marker.position.set(t.x, 13, t.z);
-      marker.rotation.y += dt * 0.8;
-      marker.material.color.setHex(t.kind === 'taxi' ? 0x4fc3ff : 0xffd34f);
-    } else if (marker) {
-      marker.visible = false;
-    }
-
-    // porch: start the next job on foot
-    if (missions.active === null && missions.jobsDone < JOBS.length && !player.driving) {
-      if (U.dist(player.x, player.z, CVH.world.porch.x, CVH.world.porch.z) < 3.6) {
-        missions.startJob(missions.jobsDone);
-      }
-    }
-
-    // job stages
-    var st = missions.currentStage();
-    if (st) {
-      if (st.time) {
-        missions.timer -= dt;
-        if (missions.timer <= 0) {
-          missions.timer = st.time;
-          if (CVH.audio) CVH.audio.fail();
-          if (CVH.hud) CVH.hud.toast('Too slow — the clock restarts. Move!');
-        }
-      }
-      var done = false;
-      if (st.type === 'pickup' || st.type === 'deliver') {
-        done = U.dist(pos.x, pos.z, st.x, st.z) < 4.5;
-        if (done && st.type === 'pickup' && CVH.fx) CVH.fx.sparkle(st.x, 1.2, st.z);
-      } else if (st.type === 'steal') {
-        done = !!(missions.missionCar && player.driving && player.car === missions.missionCar);
-      } else if (st.type === 'deliverCar') {
-        done = !!(missions.missionCar && player.driving && player.car === missions.missionCar &&
-          U.dist(pos.x, pos.z, st.x, st.z) < 6);
-        if (done) {
-          // hand the car over: it stays at the chop shop as a parked car
-          player.exitCar(true);
-          missions.missionCar.driver = 'parked';
-          missions.missionCar = null;
-        }
-      }
-      if (done) {
-        missions.stage++;
-        if (missions.stage >= JOBS[missions.active].stages.length) missions.completeJob();
-        else {
-          missions.setupStage();
-          if (CVH.audio) CVH.audio.pickup();
-          if (CVH.hud) CVH.hud.toast(missions.currentStage().label);
-        }
-      }
-    }
-
-    updateTaxi(dt);
-
-    // packages
-    for (var i = 0; i < packageMeshes.length; i++) {
+  function updatePickups(dt, P) {
+    var t = performance.now() / 1000;
+    W.PACKAGES.forEach(function (pk, i) {
       var m = packageMeshes[i];
-      if (!m.visible) continue;
-      m.rotation.y += dt * 2.2;
-      m.position.y = 1.1 + Math.sin(performance.now() * 0.003 + i) * 0.15;
-      if (missions.packagesFound[i]) { m.visible = false; continue; }
-      var pp = PACKAGES[i];
-      if (U.dist(pos.x, pos.z, pp[0], pp[1]) < 2.8) {
-        missions.packagesFound[i] = true;
-        missions.packagesTaken++;
-        m.visible = false;
-        player.cash += 250;
-        if (CVH.audio) CVH.audio.cash();
-        if (CVH.fx) CVH.fx.sparkle(pp[0], 1.2, pp[1]);
-        if (CVH.hud) CVH.hud.toast('Hidden cash  +$250  (' + missions.packagesTaken + '/14)');
+      if (!m) return;
+      if (packagesTaken[i]) { m.visible = false; return; }
+      m.rotation.y = t * 2 + i;
+      m.position.y = 1.1 + Math.sin(t * 2.4 + i) * 0.18;
+      if (U.dist(P.x, P.z, pk.x, pk.z) < 2.1) {
+        packagesTaken[i] = true;
+        P.cash += 60;
+        CVH.audio.cash();
+        if (CVH.fx) CVH.fx.burst(pk.x, 1.4, pk.z, 0x51e06a, 10);
+        if (CVH.hud) CVH.hud.toast('Hidden cash package! +$60');
       }
-    }
-
-    // weapon pickups
-    for (i = 0; i < pickupMeshes.length; i++) {
-      var pk = pickupMeshes[i];
-      pk.mesh.rotation.y += dt * 1.6;
-      if (!player.driving && U.dist(player.x, player.z, pk.x, pk.z) < 2.0) {
-        player.giveWeapon(pk.kind);
-        if (CVH.audio) CVH.audio.pickup();
-        if (CVH.hud) CVH.hud.toast(pk.kind === 'pistol' ? 'Pistol acquired — click / Space to fire' : 'SMG acquired — hold to spray');
-        pk.mesh.position.y = -5; // sink until respawn
-        pk.x = -9999; // one-shot per run location; keep simple
+    });
+    W.WEAPONS.forEach(function (wp, i) {
+      var m = weaponMeshes[i];
+      if (!m) return;
+      if (weaponsTaken[i]) { m.visible = false; return; }
+      m.rotation.y = t * 1.6;
+      if (U.dist(P.x, P.z, wp.x, wp.z) < 2.1) {
+        weaponsTaken[i] = true;
+        P.weapon = wp.kind;
+        CVH.audio.pickup();
+        if (CVH.hud) CVH.hud.toast('Picked up: ' + (wp.kind === 'smg' ? 'SMG' : 'Pistol') + ' — F to fire');
       }
+    });
+    // food stands heal
+    W.STANDS.forEach(function (s, i) {
+      if (standCd[i] > 0) standCd[i] -= dt;
+      if (standCd[i] <= 0 && P.hp < P.maxHp && P.cash >= 10 && U.dist(P.x, P.z, s.x, s.z) < 3.2) {
+        P.cash -= 10;
+        CVH.player.heal(40);
+        standCd[i] = 8;
+        CVH.audio.cash();
+        if (CVH.hud) CVH.hud.toast('Street food: +40 HP, −$10');
+      }
+    });
+    // Pay 'n Spray
+    var ps = W.PLACES.paynspray;
+    if (P.driving && CVH.police.heat > 0 && P.cash >= 100 && U.dist(P.x, P.z, ps.x, ps.z) < 7) {
+      P.cash -= 100;
+      CVH.police.setHeat(0);
+      P.driving.hp = 100; P.driving.dead = false;
+      CVH.audio.success();
+      if (CVH.hud) CVH.hud.toast('Pay ’n Spray: heat gone, car fixed, −$100');
     }
-  };
+  }
 
-  // Save/load support
-  missions.saveData = function () {
-    return { jobsDone: missions.jobsDone, packagesFound: missions.packagesFound, packagesTaken: missions.packagesTaken };
-  };
-  missions.loadData = function (d) {
-    if (!d) return;
-    missions.jobsDone = d.jobsDone || 0;
-    missions.packagesFound = d.packagesFound || {};
-    missions.packagesTaken = d.packagesTaken || 0;
-    packageMeshes.forEach(function (m, i) { m.visible = !missions.packagesFound[i]; });
-  };
+  function currentObjective() {
+    if (active) {
+      var s = active.def.stages[active.stage];
+      return { label: s.label, x: s.x, z: s.z, timer: active.def.timed ? active.timer : null, job: active.def.name };
+    }
+    if (taxi) {
+      return taxi.phase === 'pickup'
+        ? { label: 'Pick up the taxi fare', x: taxi.px, z: taxi.pz, timer: null, job: 'Taxi' }
+        : { label: 'Drop off the fare', x: taxi.dest.x, z: taxi.dest.z, timer: null, job: 'Taxi' };
+    }
+    if (jobIndex < JOBS.length) {
+      return { label: 'See Marisol at her porch for work', x: W.PLACES.porch.x, z: W.PLACES.porch.z, timer: null, job: null };
+    }
+    return { label: 'Free roam — Costa Verde is yours', x: null, z: null, timer: null, job: null };
+  }
 
-  CVH.missions = missions;
+  function reset() {
+    cancel();
+    jobIndex = 0;
+    packagesTaken = {};
+    weaponsTaken = {};
+    packageMeshes.forEach(function (m) { m.visible = true; });
+    weaponMeshes.forEach(function (m) { m.visible = true; });
+  }
+
+  CVH.missions = {
+    JOBS: JOBS,
+    auditPoints: auditPoints,
+    startJob: startJob,
+    cancel: cancel,
+    onSteal: onSteal,
+    update: update,
+    buildPickups: buildPickups,
+    currentObjective: currentObjective,
+    reset: reset,
+    get jobIndex() { return jobIndex; },
+    setJobIndex: function (i) { jobIndex = Math.max(0, Math.min(JOBS.length, i | 0)); },
+    get active() { return active; },
+    get taxi() { return taxi; },
+    get missionCar() { return missionCar; },
+    packagesTakenCount: function () { return Object.keys(packagesTaken).length; }
+  };
 })();

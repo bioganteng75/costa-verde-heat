@@ -1,112 +1,68 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Costa Verde Heat — a third-person open-world crime game</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Costa Verde Heat — Third-Person 3D Open World</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: #10131c; font-family: 'Segoe UI', Arial, sans-serif; color: #eef1f6; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e14; font-family: 'Segoe UI', system-ui, sans-serif; color: #eef2f6; }
   #game { position: fixed; inset: 0; }
   #game canvas { display: block; }
 
-  /* ---------- title screen (floats over the live 3D city) ---------- */
-  #menu {
-    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-    background: linear-gradient(180deg, rgba(10,12,24,0.42) 0%, rgba(10,12,24,0.18) 45%, rgba(10,12,24,0.55) 100%);
-    z-index: 20;
-  }
-  .panel {
-    width: min(680px, 92vw); text-align: center; padding: 30px 36px 24px;
-    background: rgba(13, 16, 28, 0.72); border: 1px solid rgba(255, 179, 71, 0.45);
-    border-radius: 18px; box-shadow: 0 24px 80px rgba(0,0,0,0.55); backdrop-filter: blur(6px);
-  }
-  h1.title {
-    font-size: 56px; font-weight: 900; letter-spacing: 2px; line-height: 1.02; text-transform: uppercase;
-    background: linear-gradient(92deg, #ffd34f 5%, #ff7a3d 35%, #ff4f81 62%, #6fe3ff 95%);
-    background-size: 220% 100%;
-    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent;
-    animation: titleFlow 6s linear infinite;
-    filter: drop-shadow(0 3px 14px rgba(255, 110, 60, 0.45));
-  }
-  @keyframes titleFlow { 0% { background-position: 0% 50%; } 100% { background-position: 220% 50%; } }
-  .tagline { margin-top: 6px; color: #ffd9a0; font-size: 15px; letter-spacing: 3px; text-transform: uppercase; }
-  .ticker {
-    margin: 18px auto 4px; overflow: hidden; white-space: nowrap; width: 100%;
-    border-top: 1px solid rgba(255,255,255,0.16); border-bottom: 1px solid rgba(255,255,255,0.16);
-    padding: 6px 0; mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
-    -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
-  }
-  #tickerTrack { display: inline-block; padding-left: 100%; animation: tick 26s linear infinite; color: #9fd8ef; font-size: 13.5px; letter-spacing: 1px; }
-  @keyframes tick { 0% { transform: translateX(0); } 100% { transform: translateX(-100%); } }
-  .chips { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin: 16px 0 6px; }
-  .chip {
-    background: rgba(255, 211, 79, 0.12); border: 1px solid rgba(255, 211, 79, 0.5); color: #ffe1a0;
-    border-radius: 999px; padding: 5px 13px; font-size: 13px; font-weight: 600; letter-spacing: 0.4px;
-  }
-  .buttons { margin: 18px 0 8px; display: flex; gap: 12px; justify-content: center; }
-  button {
-    font: inherit; font-weight: 700; letter-spacing: 1px; cursor: pointer; border-radius: 10px;
-    padding: 12px 26px; border: 1px solid rgba(255,255,255,0.25); color: #14161f; background: #ffd34f;
-    transition: transform 0.08s ease, filter 0.08s ease;
-  }
-  button:hover { filter: brightness(1.1); transform: translateY(-1px); }
-  button.secondary { background: rgba(255,255,255,0.12); color: #eef1f6; }
-  button:disabled { opacity: 0.38; cursor: default; transform: none; filter: none; }
-  .controls {
-    display: grid; grid-template-columns: repeat(4, auto); gap: 4px 18px; justify-content: center;
-    margin-top: 14px; font-size: 12.5px; color: #b9c2d0;
-  }
-  .controls b { color: #ffd34f; font-weight: 700; }
-  .foot { margin-top: 14px; font-size: 12px; color: #8a93a3; }
+  /* ---------- shared panels ---------- */
+  .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 30; }
+  .panel { background: rgba(10, 14, 22, 0.78); border: 1px solid rgba(255, 201, 60, 0.35); border-radius: 14px; padding: 26px 34px; text-align: center; backdrop-filter: blur(3px); max-width: 640px; }
+  .btn { display: block; width: 260px; margin: 9px auto; padding: 12px 18px; font-size: 17px; font-weight: 700; letter-spacing: 0.06em; color: #14100a; background: linear-gradient(180deg, #ffd76a, #f2a81b); border: none; border-radius: 9px; cursor: pointer; }
+  .btn:hover { filter: brightness(1.1); }
+  .btn.secondary { background: linear-gradient(180deg, #3d4b63, #27334a); color: #eef2f6; }
+
+  /* ---------- title screen ---------- */
+  #menu { flex-direction: column; justify-content: flex-start; padding-top: 4vh; background: linear-gradient(180deg, rgba(8,10,18,0.25) 0%, rgba(8,10,18,0) 30%, rgba(8,10,18,0) 62%, rgba(8,10,18,0.45) 100%); }
+  .gameTitle { font-size: 64px; font-weight: 900; letter-spacing: 0.02em; line-height: 0.95; text-align: center;
+    background: linear-gradient(90deg, #ffd76a, #ff7b4d, #ff4d8f, #7be0ff, #ffd76a); background-size: 300% 100%;
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+    animation: titleFlow 7s linear infinite; text-shadow: none; filter: drop-shadow(0 3px 10px rgba(0,0,0,0.55)); }
+  @keyframes titleFlow { 0% { background-position: 0% 50%; } 100% { background-position: 300% 50%; } }
+  .subtitle { text-align: center; margin-top: 6px; font-size: 16px; letter-spacing: 0.34em; color: #ffe9b0; text-shadow: 0 2px 6px rgba(0,0,0,0.8); }
+  .ticker { width: min(860px, 92vw); margin: 18px auto 0; overflow: hidden; border-top: 1px solid rgba(255,215,106,0.4); border-bottom: 1px solid rgba(255,215,106,0.4); background: rgba(8,10,18,0.55); }
+  #tickerTrack { display: inline-block; white-space: nowrap; padding: 7px 0; font-size: 14px; letter-spacing: 0.18em; color: #ffd76a; animation: tickScroll 26s linear infinite; }
+  @keyframes tickScroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+  .chips { display: flex; gap: 10px; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
+  .chip { background: rgba(10,14,22,0.72); border: 1px solid rgba(123,224,255,0.45); color: #cfeeff; border-radius: 999px; padding: 7px 14px; font-size: 13px; font-weight: 700; letter-spacing: 0.08em; }
+  .chip b { color: #ffd76a; }
+  #menu .panel { margin-top: 20px; }
+  .controls { display: grid; grid-template-columns: auto auto auto auto; gap: 4px 14px; justify-content: center; margin-top: 14px; font-size: 13px; color: #b9c6d4; }
+  .controls b { color: #ffd76a; text-align: right; }
 
   /* ---------- HUD ---------- */
-  #hud { position: fixed; inset: 0; display: none; z-index: 10; pointer-events: none; }
-  #topLeft { position: absolute; top: 16px; left: 18px; }
-  #cash { font-size: 28px; font-weight: 800; color: #7be495; text-shadow: 0 2px 8px rgba(0,0,0,0.7); }
-  #stars { font-size: 24px; letter-spacing: 3px; text-shadow: 0 2px 8px rgba(0,0,0,0.7); }
-  #healthWrap { width: 190px; height: 12px; background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.35); border-radius: 6px; margin-top: 6px; overflow: hidden; }
-  #healthFill { height: 100%; width: 100%; background: linear-gradient(90deg, #e0483e, #f2c14e 55%, #53d769); transition: width 0.2s; }
-  #banner {
-    position: absolute; top: 18px; left: 50%; transform: translateX(-50%); max-width: 70vw;
-    background: rgba(10, 12, 22, 0.72); border: 1px solid rgba(255, 211, 79, 0.55); border-radius: 10px;
-    padding: 9px 20px; font-size: 16.5px; font-weight: 600; color: #ffe9b8; text-align: center; display: none;
-  }
-  #bustWrap {
-    position: absolute; top: 74px; left: 50%; transform: translateX(-50%); width: 260px; display: none;
-    background: rgba(0,0,0,0.55); border: 1px solid #ff5f4d; border-radius: 6px; overflow: hidden;
-  }
-  #bustFill { height: 12px; width: 0%; background: #ff5f4d; }
-  #bustWrap span { position: absolute; inset: 0; font-size: 10px; text-align: center; letter-spacing: 2px; color: #fff; }
-  #minimap { position: absolute; left: 18px; bottom: 18px; border: 2px solid rgba(255,255,255,0.4); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,0.5); }
-  #bottomRight { position: absolute; right: 18px; bottom: 18px; text-align: right; }
-  #weapon { font-size: 17px; font-weight: 700; color: #eef1f6; text-shadow: 0 2px 6px rgba(0,0,0,0.8); }
-  #speedo { font-size: 30px; font-weight: 800; color: #ffd34f; text-shadow: 0 2px 8px rgba(0,0,0,0.8); display: none; }
-  #soundLine { margin-top: 4px; font-size: 12.5px; color: #b9c2d0; }
-  #toast {
-    position: absolute; bottom: 108px; left: 50%; transform: translateX(-50%);
-    background: rgba(10, 12, 22, 0.82); border-radius: 10px; padding: 10px 22px; font-size: 16px;
-    color: #ffe9b8; opacity: 0; transition: opacity 0.35s; max-width: 80vw; text-align: center;
-  }
-  #hint { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); font-size: 12.5px; color: rgba(238,241,246,0.75); text-shadow: 0 1px 4px #000; }
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 20; display: none; }
+  #minimap { position: absolute; top: 14px; left: 14px; width: 190px; height: 190px; border: 2px solid rgba(255,255,255,0.35); border-radius: 10px; background: #20303c; }
+  .hudBox { position: absolute; background: rgba(8,11,18,0.62); border-radius: 9px; padding: 8px 12px; }
+  #statsBox { top: 14px; right: 14px; text-align: right; min-width: 168px; }
+  #hudCash { font-size: 24px; font-weight: 800; color: #7be07b; }
+  #hudStars { font-size: 19px; color: #ffd76a; letter-spacing: 2px; min-height: 24px; }
+  .barOuter { height: 9px; background: rgba(255,255,255,0.16); border-radius: 5px; overflow: hidden; margin-top: 5px; }
+  #hudHpFill { height: 100%; background: #57d95e; width: 100%; }
+  #hudHeatFill { height: 100%; background: #ff5252; width: 0%; }
+  .barLabel { font-size: 10px; letter-spacing: 0.2em; color: #aeb9c6; margin-top: 5px; }
+  #hudSpeed { font-size: 19px; font-weight: 700; color: #fff; min-height: 23px; }
+  #hudWeapon { font-size: 12px; letter-spacing: 0.22em; color: #7be0ff; }
+  #banner { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); max-width: 46vw; text-align: center; background: rgba(8,11,18,0.66); border: 1px solid rgba(255,201,60,0.4); border-radius: 9px; padding: 8px 18px; }
+  #bannerText { font-size: 16px; font-weight: 700; color: #ffe9b0; }
+  #bannerDist { font-size: 13px; color: #7be0ff; font-weight: 700; }
+  #bustWrap { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); width: 280px; display: none; text-align: center; }
+  #bustWrap .barOuter { height: 13px; }
+  #bustFill { height: 100%; background: #4d7cff; width: 0%; }
+  #bustWrap span { font-weight: 800; letter-spacing: 0.3em; color: #9db9ff; text-shadow: 0 2px 5px #000; }
+  #toast { position: absolute; bottom: 56px; left: 50%; transform: translateX(-50%); background: rgba(8,11,18,0.8); border-radius: 9px; padding: 10px 22px; font-size: 16px; font-weight: 600; color: #fff; opacity: 0; transition: opacity 0.35s; max-width: 70vw; text-align: center; }
+  #hint { position: absolute; bottom: 12px; left: 14px; font-size: 12px; color: rgba(255,255,255,0.75); text-shadow: 0 1px 3px #000; }
 
-  /* ---------- overlays ---------- */
-  .overlay {
-    position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 30;
-    background: rgba(8, 10, 18, 0.66);
-  }
-  .overlay .box { text-align: center; background: rgba(13,16,28,0.9); border: 1px solid rgba(255,255,255,0.22); border-radius: 16px; padding: 30px 42px; min-width: 340px; }
-  .overlay h2 { font-size: 34px; letter-spacing: 2px; margin-bottom: 10px; }
-  .overlay p { color: #b9c2d0; margin-bottom: 16px; }
-  .overlay .col { display: flex; flex-direction: column; gap: 10px; }
-  #busted { background: rgba(20, 30, 80, 0.45); }
-  #busted h2 { color: #7ab0ff; font-size: 64px; text-shadow: 0 4px 30px rgba(40,90,255,0.8); background: none; border: none; }
-  #wasted { background: rgba(80, 10, 10, 0.45); }
-  #wasted h2 { color: #ff6a5e; font-size: 64px; text-shadow: 0 4px 30px rgba(255,40,30,0.8); background: none; border: none; }
-  .bigOverlay { flex-direction: column; }
-  .bigOverlay p { font-size: 17px; color: #eef1f6; }
-  #nogl { background: #14161f; z-index: 50; }
-  #nogl .box { max-width: 520px; }
+  /* ---------- ending / nogl ---------- */
+  #ending .panel h1, #pause .panel h1 { font-size: 34px; color: #ffd76a; margin-bottom: 10px; }
+  #ending .panel p, #pause .panel p { color: #c6d2df; margin-bottom: 14px; line-height: 1.45; }
+  #nogl { background: #14100e; z-index: 50; }
+  #nogl .panel { border-color: #ff5252; }
 </style>
 </head>
 <body>
@@ -114,90 +70,76 @@
 
 <!-- HUD -->
 <div id="hud">
-  <div id="topLeft">
-    <div id="cash">$0</div>
-    <div id="stars">☆☆☆☆☆</div>
-    <div id="healthWrap"><div id="healthFill"></div></div>
-  </div>
-  <div id="banner"><span id="bannerText"></span></div>
-  <div id="bustWrap"><div id="bustFill"></div><span>BUSTED</span></div>
   <canvas id="minimap" width="190" height="190"></canvas>
-  <div id="bottomRight">
-    <div id="speedo">0 km/h</div>
-    <div id="weapon">FISTS</div>
-    <div id="soundLine">SOUND: <span id="soundState">ON</span> · M to toggle</div>
+  <div id="banner"><span id="bannerText"></span> <span id="bannerDist"></span></div>
+  <div class="hudBox" id="statsBox">
+    <div id="hudCash">$0</div>
+    <div id="hudStars"></div>
+    <div class="barLabel">HEALTH</div>
+    <div class="barOuter"><div id="hudHpFill"></div></div>
+    <div class="barLabel">HEAT</div>
+    <div class="barOuter"><div id="hudHeatFill"></div></div>
+    <div id="hudSpeed"></div>
+    <div id="hudWeapon">FISTS</div>
   </div>
+  <div id="bustWrap"><span>BUSTED</span><div class="barOuter"><div id="bustFill"></div></div></div>
   <div id="toast"></div>
-  <div id="hint">WASD move · Mouse look · E enter/exit car · Click/Space fire · Shift sprint · Esc pause</div>
+  <div id="hint">WASD move · E enter/exit car · F punch/fire · M sound (<span class="soundState">ON</span>) · P pause · click game for mouse look</div>
 </div>
 
-<!-- Title screen -->
-<div id="menu">
+<!-- TITLE SCREEN -->
+<div id="menu" class="overlay">
+  <div class="gameTitle">COSTA VERDE<br>HEAT</div>
+  <div class="subtitle">THIRD-PERSON OPEN-WORLD HEAT</div>
+  <div class="ticker"><div id="tickerTrack">6 STORY JOBS FOR MARISOL VEGA ✦ 5-STAR POLICE HEAT ✦ TAXI FARES ✦ PAY ’N SPRAY ✦ 14 HIDDEN CASH PACKAGES ✦ BEACH, MARINA &amp; THE PIER ✦ DAY INTO DUSK ✦&nbsp;6 STORY JOBS FOR MARISOL VEGA ✦ 5-STAR POLICE HEAT ✦ TAXI FARES ✦ PAY ’N SPRAY ✦ 14 HIDDEN CASH PACKAGES ✦ BEACH, MARINA &amp; THE PIER ✦ DAY INTO DUSK ✦&nbsp;</div></div>
+  <div class="chips">
+    <div class="chip"><b>6</b> STORY JOBS</div>
+    <div class="chip"><b>40</b> CITIZENS</div>
+    <div class="chip"><b>5★</b> MAX HEAT</div>
+    <div class="chip"><b>6</b> RIDE TYPES</div>
+    <div class="chip"><b>14</b> CASH STASHES</div>
+  </div>
   <div class="panel">
-    <h1 class="title">Costa Verde Heat</h1>
-    <div class="tagline">Third-person open-world crime · Costa Verde</div>
-    <div class="ticker"><span id="tickerTrack">6 STORY JOBS FOR MARISOL VEGA ✦ WANTED SYSTEM WITH PURSUIT AI ✦ STEAL ANY CAR ✦ TAXI FARES ✦ PAY 'N SPRAY ✦ 14 HIDDEN CASH PACKAGES ✦ PISTOL + SMG ✦ DAY-TO-DUSK COASTAL CITY ✦ MARINA · BEACH · PIER ✦&nbsp;</span></div>
-    <div class="chips">
-      <span class="chip">6 story jobs</span>
-      <span class="chip">5-star wanted</span>
-      <span class="chip">6 vehicle types</span>
-      <span class="chip">14 hidden packages</span>
-      <span class="chip">Taxi + Pay 'n Spray</span>
-    </div>
-    <div class="buttons">
-      <button id="btnNewGame">NEW GAME</button>
-      <button id="btnContinue" class="secondary">CONTINUE</button>
-    </div>
+    <button class="btn" id="btnNewGame">NEW GAME</button>
+    <button class="btn secondary" id="btnContinue">CONTINUE</button>
+    <button class="btn secondary btnSound">SOUND: <span class="soundState">ON</span></button>
     <div class="controls">
-      <span><b>WASD</b> move / drive</span>
-      <span><b>Mouse</b> look (click to lock)</span>
-      <span><b>E</b> enter / exit car · stands</span>
-      <span><b>Click / Space</b> fire</span>
-      <span><b>Shift</b> sprint</span>
-      <span><b>1/2/3</b> fists / pistol / SMG</span>
-      <span><b>M</b> mute</span>
-      <span><b>Esc / P</b> pause</span>
+      <b>WASD</b><span>Move / drive</span><b>MOUSE</b><span>Look (click game)</span>
+      <b>E</b><span>Enter / exit car</span><b>F</b><span>Punch / fire</span>
+      <b>M</b><span>Sound on/off</span><b>P</b><span>Pause</span>
     </div>
-    <div class="foot">Fixer Marisol Vega runs the porch on the east avenue. Do her six jobs, dodge the heat, own the coast.</div>
   </div>
 </div>
 
-<!-- Pause -->
+<!-- PAUSE -->
 <div id="pause" class="overlay">
-  <div class="box">
-    <h2>PAUSED</h2>
+  <div class="panel">
+    <h1>PAUSED</h1>
     <p>Costa Verde waits for no one. Well — just this once.</p>
-    <div class="col">
-      <button id="btnResume">RESUME</button>
-      <button id="btnSave" class="secondary">SAVE GAME</button>
-      <button id="btnSound" class="secondary">SOUND: ON</button>
-      <button id="btnRestart" class="secondary">RESTART STORY</button>
-      <button id="btnQuit" class="secondary">QUIT TO MENU</button>
-    </div>
+    <button class="btn" id="btnResume">RESUME</button>
+    <button class="btn secondary" id="btnSave">SAVE</button>
+    <button class="btn secondary btnSound">SOUND: <span class="soundState">ON</span></button>
+    <button class="btn secondary" id="btnRestart">RESTART STORY</button>
+    <button class="btn secondary" id="btnQuit">QUIT TO MENU</button>
   </div>
 </div>
 
-<!-- Ending -->
+<!-- ENDING -->
 <div id="ending" class="overlay">
-  <div class="box">
-    <h2 style="color:#ffd34f;">COSTA VERDE IS YOURS</h2>
-    <p>All six of Marisol's jobs are done. The city keeps spinning — fares, packages and trouble included.</p>
-    <p id="endingStats"></p>
-    <div class="col">
-      <button id="btnFreeRoam">KEEP ROAMING</button>
-    </div>
+  <div class="panel">
+    <h1>THE FINAL SCORE — DONE</h1>
+    <p>Every job for Marisol Vega is complete. The last package is at the bottom of the bay,
+       the heat has cooled, and Costa Verde belongs to you now. Keep cruising — the city stays open.</p>
+    <button class="btn" id="btnEnding">KEEP PLAYING</button>
   </div>
 </div>
 
-<!-- Busted / Wasted -->
-<div id="busted" class="overlay bigOverlay"><h2>BUSTED</h2><p>The Costa Verde PD sends its regards. You lost 10% of your cash.</p></div>
-<div id="wasted" class="overlay bigOverlay"><h2>WASTED</h2><p>You wake up at Costa Verde General. You lost 10% of your cash.</p></div>
-
-<!-- WebGL fallback -->
+<!-- WEBGL FALLBACK -->
 <div id="nogl" class="overlay">
-  <div class="box">
-    <h2>WebGL unavailable</h2>
-    <p>Costa Verde Heat needs WebGL to render its 3D city, and this browser could not create a WebGL context. Try a recent desktop Chrome with hardware acceleration enabled, then reload.</p>
+  <div class="panel">
+    <h1 style="color:#ff7b7b;font-size:30px;margin-bottom:10px;">WebGL unavailable</h1>
+    <p>Costa Verde Heat needs WebGL to render its 3D city, but this browser could not create a WebGL context.
+       Try a recent desktop Chrome/Edge/Firefox with hardware acceleration enabled, then reload the page.</p>
   </div>
 </div>
 
@@ -206,11 +148,11 @@
 <script src="src/audio.js"></script>
 <script src="src/input.js"></script>
 <script src="src/world.js"></script>
-<script src="src/fx.js"></script>
 <script src="src/vehicles.js"></script>
-<script src="src/police.js"></script>
 <script src="src/player.js"></script>
+<script src="src/police.js"></script>
 <script src="src/missions.js"></script>
+<script src="src/fx.js"></script>
 <script src="src/hud.js"></script>
 <script src="src/shots.js"></script>
 <script src="src/main.js"></script>
