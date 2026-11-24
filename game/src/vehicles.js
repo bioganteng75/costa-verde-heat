@@ -1,506 +1,500 @@
-'use strict';
-// Costa Verde Heat 3D — cars: low-poly builds (sedan, sport, taxi, motorcycle,
-// truck, police cruiser with a flashing light bar), arcade driving physics
-// with drift, lane-following traffic AI, and the shared steering used by
-// police pursuit. A car's `driver` is null (parked), 'traffic', 'police' or
-// 'player'. Wrecked cars (health <= 0) smoke, stop, and stay wrecked.
+// vehicles.js — every car in Costa Verde: six low-poly types built from
+// boxes/cylinders, one shared arcade integrator, lane-following traffic
+// AI with obstacle braking and a gridlock breaker, parked cars to steal,
+// and the player-driving feel (drift handbrake included). Police and
+// missions steer their cars by writing car.input; this module owns the
+// physics, collisions and visuals. Owns CVH.vehicles and CVH.cars.
+(function () {
+  'use strict';
 
-CVH.vehicles = {
-  all: [],
-  TYPES: {
-    sedan:  { w: 1.85, l: 4.3, bodyH: 0.62, cabH: 0.55, accel: 15, maxF: 31, maxR: 9,  grip: 9,  radius: 1.9 },
-    sport:  { w: 1.9,  l: 4.4, bodyH: 0.55, cabH: 0.45, accel: 21, maxF: 41, maxR: 10, grip: 10, radius: 1.9 },
-    taxi:   { w: 1.85, l: 4.3, bodyH: 0.62, cabH: 0.55, accel: 15, maxF: 31, maxR: 9,  grip: 9,  radius: 1.9 },
-    moto:   { w: 0.7,  l: 2.3, bodyH: 0.5,  cabH: 0,    accel: 23, maxF: 39, maxR: 6,  grip: 11, radius: 1.0 },
-    truck:  { w: 2.2,  l: 6.6, bodyH: 1.5,  cabH: 0.8,  accel: 11, maxF: 24, maxR: 7,  grip: 8,  radius: 2.6 },
-    police: { w: 1.85, l: 4.4, bodyH: 0.62, cabH: 0.55, accel: 18, maxF: 35, maxR: 9,  grip: 9.5, radius: 1.9 }
-  },
-  COLORS: [0xd8574a, 0x4a7fd8, 0xe8e4da, 0x3a3f45, 0x57b06a, 0xe8a13a, 0x8a5fb0, 0xcfd4d8, 0x7a4a35],
+  var CVH = window.CVH = window.CVH || {};
+  var THREE = window.THREE;
 
-  _headlightTex: null,
+  var cars = CVH.cars = [];
+  var coneMat = null;      // shared by every headlight cone (dusk-driven)
+  var rng = null;
 
-  headlightTexture: function () {
-    if (this._headlightTex) return this._headlightTex;
-    const c = document.createElement('canvas');
-    c.width = 4; c.height = 64;
-    const g = c.getContext('2d');
-    const grad = g.createLinearGradient(0, 0, 0, 64);
-    grad.addColorStop(0, 'rgba(255,240,190,0.85)');
-    grad.addColorStop(0.4, 'rgba(255,230,160,0.35)');
-    grad.addColorStop(1, 'rgba(255,220,140,0)');
-    g.fillStyle = grad;
-    g.fillRect(0, 0, 4, 64);
-    this._headlightTex = new THREE.CanvasTexture(c);
-    return this._headlightTex;
-  },
+  var TYPES = {
+    sedan:  { len: 4.2, wid: 1.8, bodyH: 0.62, bodyY: 0.58, cabLen: 2.0, cabH: 0.52, wheel: 0.34, top: 26, accel: 15, colors: [0xb8452e, 0x2e6db8, 0xd8d3c8, 0x3f9e58, 0x7456a8, 0xc7c9cc] },
+    sport:  { len: 4.3, wid: 1.85, bodyH: 0.5, bodyY: 0.5, cabLen: 1.7, cabH: 0.44, wheel: 0.35, top: 37, accel: 24, colors: [0xe03a2e, 0xf28c28, 0x22242a, 0x2ec4b8] },
+    taxi:   { len: 4.2, wid: 1.8, bodyH: 0.62, bodyY: 0.58, cabLen: 2.0, cabH: 0.52, wheel: 0.34, top: 25, accel: 15, colors: [0xf2b134] },
+    moto:   { len: 2.2, wid: 0.55, bodyH: 0.34, bodyY: 0.55, cabLen: 0, cabH: 0, wheel: 0.31, top: 34, accel: 26, colors: [0x22242a, 0xb82e3a, 0x2e6db8] },
+    truck:  { len: 6.6, wid: 2.3, bodyH: 1.5, bodyY: 1.15, cabLen: 1.6, cabH: 0.9, wheel: 0.46, top: 20, accel: 10, colors: [0x8a8f96, 0x4a7a9e, 0xa8542e] },
+    police: { len: 4.3, wid: 1.85, bodyH: 0.62, bodyY: 0.58, cabLen: 2.0, cabH: 0.52, wheel: 0.34, top: 32, accel: 21, colors: [0x1c2f4a] }
+  };
 
-  makeCar: function (scene, type, color) {
-    const cfg = this.TYPES[type];
-    const grp = new THREE.Group();
-    const paint = new THREE.MeshLambertMaterial({ color: color });
-    const glass = new THREE.MeshLambertMaterial({ color: 0x1c2836 });
-    const dark = new THREE.MeshLambertMaterial({ color: 0x22262b });
-    const geo = CVH.world._unitBox || (CVH.world._unitBox = new THREE.BoxGeometry(1, 1, 1));
+  function coneTexture() {
+    var c = document.createElement('canvas');
+    c.width = 16; c.height = 64;
+    var g = c.getContext('2d');
+    var grad = g.createLinearGradient(0, 0, 0, 64);
+    grad.addColorStop(0, 'rgba(255,240,200,0.85)');
+    grad.addColorStop(1, 'rgba(255,240,200,0)');
+    g.fillStyle = grad; g.fillRect(0, 0, 16, 64);
+    return new THREE.CanvasTexture(c);
+  }
 
-    const body = new THREE.Mesh(geo, paint);
-    body.scale.set(cfg.w, cfg.bodyH, cfg.l);
-    body.position.y = 0.38 + cfg.bodyH / 2;
-    body.castShadow = true;
-    grp.add(body);
+  var glassMat = null, tyreMat = null, chromeMat = null;
 
-    let wheels = [];
-    const wheelGeo = new THREE.CylinderGeometry(type === 'moto' ? 0.31 : 0.34, type === 'moto' ? 0.31 : 0.34, 0.24, 10);
-    wheelGeo.rotateZ(Math.PI / 2);
-    const addWheel = (x, z) => {
-      const pivot = new THREE.Group();
-      pivot.position.set(x, 0.34, z);
-      const w = new THREE.Mesh(wheelGeo, dark);
-      w.castShadow = true;
-      pivot.add(w);
-      grp.add(pivot);
-      wheels.push({ pivot: pivot, mesh: w });
-      return pivot;
-    };
+  function buildMesh(type, color) {
+    var T = TYPES[type];
+    var g = new THREE.Group();
+    var bodyMat = new THREE.MeshLambertMaterial({ color: color });
+    var body = new THREE.Mesh(CVH._unitBox, bodyMat);
+    body.scale.set(T.wid, T.bodyH, T.len);
+    body.position.y = T.bodyY;
+    body.castShadow = true; body.receiveShadow = true;
+    g.add(body);
 
-    let brakeMat = null, lightMats = null, cones = [];
-
-    if (type === 'moto') {
-      const tank = new THREE.Mesh(geo, paint);
-      tank.scale.set(0.42, 0.3, 1.1);
-      tank.position.set(0, 0.78, 0.1);
-      grp.add(tank);
-      const seat = new THREE.Mesh(geo, dark);
-      seat.scale.set(0.4, 0.14, 0.8);
-      seat.position.set(0, 0.82, -0.55);
-      grp.add(seat);
-      addWheel(0, 0.95); addWheel(0, -0.95);
-    } else {
-      const cab = new THREE.Mesh(geo, type === 'truck' ? paint : glass);
-      cab.scale.set(cfg.w * 0.84, cfg.cabH, type === 'truck' ? 1.6 : cfg.l * 0.46);
-      cab.position.set(0, 0.38 + cfg.bodyH + cfg.cabH / 2, type === 'truck' ? cfg.l / 2 - 1.1 : -cfg.l * 0.04);
+    if (type === 'truck') {
+      var cargo = new THREE.Mesh(CVH._unitBox, new THREE.MeshLambertMaterial({ color: 0xdcd8d0 }));
+      cargo.scale.set(2.2, 2.0, 4.2);
+      cargo.position.set(0, 1.55, -1.0);
+      cargo.castShadow = true;
+      g.add(cargo);
+      var cab = new THREE.Mesh(CVH._unitBox, bodyMat);
+      cab.scale.set(2.2, 0.95, 1.5);
+      cab.position.set(0, 0.95, 2.45);
       cab.castShadow = true;
-      grp.add(cab);
-      if (type === 'truck') {
-        const cabGlass = new THREE.Mesh(geo, glass);
-        cabGlass.scale.set(cfg.w * 0.86, 0.5, 0.9);
-        cabGlass.position.set(0, 0.38 + cfg.bodyH + 0.42, cfg.l / 2 - 0.75);
-        grp.add(cabGlass);
+      g.add(cab);
+    } else if (type === 'moto') {
+      var tank = new THREE.Mesh(CVH._unitBox, bodyMat);
+      tank.scale.set(0.34, 0.3, 1.0);
+      tank.position.set(0, 0.72, 0.25);
+      g.add(tank);
+      // rider: torso, head, legs — leans with steering (player.js poses
+      // the player separately; this rider is for traffic/parked motos)
+      var rider = new THREE.Group();
+      var torso = new THREE.Mesh(CVH._unitBox, new THREE.MeshLambertMaterial({ color: 0x35424e }));
+      torso.scale.set(0.44, 0.62, 0.26);
+      torso.position.y = 0.35;
+      rider.add(torso);
+      var head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), new THREE.MeshLambertMaterial({ color: 0xd9a066 }));
+      head.position.y = 0.85;
+      rider.add(head);
+      rider.position.set(0, 0.95, -0.15);
+      rider.rotation.x = 0.25;
+      g.add(rider);
+      g.userData.rider = rider;
+    } else {
+      var cabMat = type === 'police' ? new THREE.MeshLambertMaterial({ color: 0xf0f2f4 }) : glassMat;
+      var cab = new THREE.Mesh(CVH._unitBox, cabMat);
+      cab.scale.set(T.wid - 0.25, T.cabH, T.cabLen);
+      cab.position.set(0, T.bodyY + T.bodyH / 2 + T.cabH / 2 - 0.04, -0.15);
+      cab.castShadow = true;
+      g.add(cab);
+      if (type === 'taxi') {
+        var sign = new THREE.Mesh(CVH._unitBox, new THREE.MeshLambertMaterial({ color: 0xfff6c8, emissive: new THREE.Color(0xffdf7a), emissiveIntensity: 0.4 }));
+        sign.scale.set(0.7, 0.18, 0.3);
+        sign.position.set(0, cab.position.y + T.cabH / 2 + 0.1, -0.15);
+        g.add(sign);
       }
-      const wx = cfg.w / 2 - 0.08, wz = cfg.l / 2 - 0.85;
-      addWheel(-wx, wz); addWheel(wx, wz); addWheel(-wx, -wz); addWheel(wx, -wz);
-      // Brake lights.
-      brakeMat = new THREE.MeshLambertMaterial({ color: 0x571b14, emissive: 0xff2a1a, emissiveIntensity: 0.25 });
-      for (const sx of [-1, 1]) {
-        const bl = new THREE.Mesh(geo, brakeMat);
-        bl.scale.set(0.42, 0.14, 0.06);
-        bl.position.set(sx * cfg.w * 0.32, 0.72, -cfg.l / 2 - 0.02);
-        grp.add(bl);
-      }
-      // Headlight beams: cone geometry pre-rotated so the apex sits at the
-      // lamp and the beam widens forward (+Z), gradient fading with length.
-      const coneGeo = new THREE.ConeGeometry(1.45, 7, 12, 1, true);
-      coneGeo.translate(0, -3.5, 0);
-      coneGeo.rotateX(-Math.PI / 2);
-      const coneMat = new THREE.MeshBasicMaterial({
-        map: this.headlightTexture(), transparent: true, opacity: 0.5,
+    }
+
+    // wheels — front pair sits in steer pivots
+    var wheelGeo = new THREE.CylinderGeometry(T.wheel, T.wheel, 0.24, 10);
+    wheelGeo.rotateZ(Math.PI / 2);
+    var wheels = [], pivots = [];
+    var wx = T.wid / 2 - 0.05, wz = T.len / 2 - 0.75;
+    var spots = [[-wx, wz, true], [wx, wz, true], [-wx, -wz, false], [wx, -wz, false]];
+    for (var i = 0; i < 4; i++) {
+      var pivot = new THREE.Group();
+      pivot.position.set(spots[i][0], T.wheel, spots[i][1]);
+      var wm = new THREE.Mesh(wheelGeo, tyreMat);
+      wm.castShadow = true;
+      pivot.add(wm);
+      g.add(pivot);
+      wheels.push(wm);
+      if (spots[i][2]) pivots.push(pivot);
+    }
+
+    // brake lights (own material so braking can flare them)
+    var brakeMat = new THREE.MeshLambertMaterial({ color: 0x881111, emissive: new THREE.Color(0xff2222), emissiveIntensity: 0.35 });
+    if (type !== 'moto') {
+      [-1, 1].forEach(function (s) {
+        var bl = new THREE.Mesh(CVH._unitBox, brakeMat);
+        bl.scale.set(0.34, 0.14, 0.06);
+        bl.position.set(s * (T.wid / 2 - 0.3), T.bodyY + 0.12, -T.len / 2 - 0.02);
+        g.add(bl);
+      });
+    }
+
+    // headlight cones: apex at the lamp, soft gradient to the base
+    var cones = [];
+    if (type !== 'moto') {
+      [-1, 1].forEach(function (s) {
+        var cg = new THREE.ConeGeometry(1.35, 9, 12, 1, true);
+        cg.rotateX(-Math.PI / 2);
+        cg.translate(0, 0, 4.5);
+        var cone = new THREE.Mesh(cg, coneMat);
+        cone.position.set(s * (T.wid / 2 - 0.35), 0.55, T.len / 2);
+        cone.renderOrder = 4;
+        g.add(cone);
+        cones.push(cone);
+      });
+    }
+
+    // police light bar with independently flashing halves
+    var barMats = null;
+    if (type === 'police') {
+      var barBase = new THREE.Mesh(CVH._unitBox, chromeMat);
+      barBase.scale.set(1.2, 0.09, 0.34);
+      barBase.position.set(0, cab.position.y + T.cabH / 2 + 0.06, -0.15);
+      g.add(barBase);
+      var redMat = new THREE.MeshLambertMaterial({ color: 0x550000, emissive: new THREE.Color(0xff2020), emissiveIntensity: 0.2 });
+      var blueMat = new THREE.MeshLambertMaterial({ color: 0x000055, emissive: new THREE.Color(0x2266ff), emissiveIntensity: 0.2 });
+      var rl = new THREE.Mesh(CVH._unitBox, redMat);
+      rl.scale.set(0.55, 0.16, 0.3); rl.position.set(-0.3, barBase.position.y + 0.12, -0.15);
+      g.add(rl);
+      var bl2 = new THREE.Mesh(CVH._unitBox, blueMat);
+      bl2.scale.set(0.55, 0.16, 0.3); bl2.position.set(0.3, barBase.position.y + 0.12, -0.15);
+      g.add(bl2);
+      barMats = [redMat, blueMat];
+    }
+    return { group: g, wheels: wheels, pivots: pivots, brakeMat: brakeMat, barMats: barMats, bodyMat: bodyMat };
+  }
+
+  // ---------------------------------------------------------------- cars
+  var vehicles = CVH.vehicles = {};
+
+  vehicles.makeCar = function (type, x, z, yaw, opts) {
+    opts = opts || {};
+    if (!glassMat) {
+      glassMat = new THREE.MeshLambertMaterial({ color: 0x1d2733 });
+      tyreMat = new THREE.MeshLambertMaterial({ color: 0x17181a });
+      chromeMat = new THREE.MeshLambertMaterial({ color: 0x9aa2ab });
+      coneMat = new THREE.MeshBasicMaterial({
+        map: coneTexture(), transparent: true, opacity: 0,
         blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false
       });
-      for (const sx of [-1, 1]) {
-        const cone = new THREE.Mesh(coneGeo, coneMat);
-        cone.position.set(sx * cfg.w * 0.32, 0.62, cfg.l / 2);
-        cone.visible = false;
-        grp.add(cone);
-        cones.push(cone);
-      }
     }
-
-    if (type === 'taxi') {
-      const signMat = new THREE.MeshLambertMaterial({ color: 0xffe9a3, emissive: 0xffc93c, emissiveIntensity: 0.7 });
-      const sign = new THREE.Mesh(geo, signMat);
-      sign.scale.set(0.8, 0.22, 0.4);
-      sign.position.set(0, 0.38 + cfg.bodyH + cfg.cabH + 0.12, -cfg.l * 0.04);
-      grp.add(sign);
-    }
-    if (type === 'police') {
-      const barMat = new THREE.MeshLambertMaterial({ color: 0x2a2e33 });
-      const bar = new THREE.Mesh(geo, barMat);
-      bar.scale.set(1.25, 0.15, 0.46);
-      bar.position.set(0, 0.38 + cfg.bodyH + cfg.cabH + 0.09, -cfg.l * 0.04);
-      grp.add(bar);
-      const red = new THREE.MeshLambertMaterial({ color: 0x550000, emissive: 0xff2211, emissiveIntensity: 0.2 });
-      const blue = new THREE.MeshLambertMaterial({ color: 0x000055, emissive: 0x2266ff, emissiveIntensity: 0.2 });
-      const rl = new THREE.Mesh(geo, red); rl.scale.set(0.5, 0.17, 0.4); rl.position.set(-0.32, bar.position.y + 0.02, bar.position.z); grp.add(rl);
-      const bl2 = new THREE.Mesh(geo, blue); bl2.scale.set(0.5, 0.17, 0.4); bl2.position.set(0.32, bar.position.y + 0.02, bar.position.z); grp.add(bl2);
-      lightMats = { red: red, blue: blue };
-      // Black hood + trunk over the white paint.
-      const hood = new THREE.Mesh(geo, dark);
-      hood.scale.set(cfg.w * 0.96, 0.1, 1.0);
-      hood.position.set(0, 0.38 + cfg.bodyH + 0.03, cfg.l / 2 - 0.55);
-      grp.add(hood);
-    }
-
-    scene.add(grp);
-    const car = {
-      type: type, cfg: cfg, mesh: grp, color: color,
-      heading: 0, vel: new THREE.Vector3(), speed: 0,
-      health: 100, dead: false, driver: null,
-      wheels: wheels, brakeMat: brakeMat, lightMats: lightMats, cones: cones,
-      braking: false, steerVis: 0, smokeT: 0, blockedT: 0, hitPlayerCd: 0,
-      road: null, aiTarget: null, aiSpeed: 0, decideCd: 0
+    var T = TYPES[type];
+    var color = opts.color !== undefined ? opts.color : T.colors[Math.floor((rng || Math.random)() * T.colors.length) % T.colors.length];
+    var built = buildMesh(type, color);
+    built.group.position.set(x, 0, z);
+    built.group.rotation.y = yaw;
+    CVH.scene.add(built.group);
+    var car = {
+      mesh: built.group, type: type, color: color,
+      yaw: yaw, speed: 0, steerVis: 0, wheelSpin: 0,
+      driver: opts.driver || 'parked', // parked | traffic | police | player | wreck
+      hp: 100, dead: false, radius: type === 'moto' ? 0.9 : (type === 'truck' ? 2.3 : 1.55),
+      topSpeed: T.top, accel: T.accel,
+      input: { throttle: 0, steer: 0, brake: false },
+      wheels: built.wheels, pivots: built.pivots, brakeMat: built.brakeMat, barMats: built.barMats,
+      axis: null, dir: 1, lane: 0, cruise: 10, stuckT: 0, turnCd: 0, turning: null,
+      smokeT: Math.random() * 0.2, crashCd: 0, mission: !!opts.mission,
+      pos: built.group.position
     };
-    grp.userData.car = car;
-    this.all.push(car);
+    built.group.children[0].userData.car = car; // raycast back-reference
+    cars.push(car);
     return car;
-  },
+  };
 
-  placeCar: function (car, x, z, heading) {
-    car.mesh.position.set(x, 0, z);
-    car.heading = heading;
-    car.mesh.rotation.y = heading;
-    car.vel.set(0, 0, 0);
-    car.speed = 0;
-  },
+  vehicles.removeCar = function (car) {
+    var i = cars.indexOf(car);
+    if (i >= 0) cars.splice(i, 1);
+    CVH.scene.remove(car.mesh);
+  };
 
-  removeCar: function (car) {
-    const i = this.all.indexOf(car);
-    if (i >= 0) this.all.splice(i, 1);
-    if (car.mesh.parent) car.mesh.parent.remove(car.mesh);
-  },
-
-  fwdOf: function (car) { return { x: Math.sin(car.heading), z: Math.cos(car.heading) }; },
-
-  // Pick a lane state on the road network nearest to a point.
-  laneAt: function (x, z, preferDir) {
-    let bi = 0, bd = 1e9;
-    for (let i = 0; i < 8; i++) { const d = Math.abs(x - CVH.world.roadX(i)); if (d < bd) { bd = d; bi = i; } }
-    let bj = 0, bd2 = 1e9;
-    for (let j = 0; j < 6; j++) { const d = Math.abs(z - CVH.world.roadZ(j)); if (d < bd2) { bd2 = d; bj = j; } }
-    if (bd <= bd2) return { axis: 'z', index: bi, dir: preferDir || (CVH.rng() < 0.5 ? 1 : -1) };
-    return { axis: 'x', index: bj, dir: preferDir || (CVH.rng() < 0.5 ? 1 : -1) };
-  },
-
-  lanePoint: function (road, along) {
-    // Centre of the correct (right-hand) lane for a car travelling `dir`.
-    if (road.axis === 'z') {
-      return { x: CVH.world.roadX(road.index) - road.dir * 3.2, z: along };
+  vehicles.nearestCar = function (x, z, maxDist, pred) {
+    var best = null, bd = maxDist * maxDist;
+    for (var i = 0; i < cars.length; i++) {
+      var c = cars[i];
+      if (pred && !pred(c)) continue;
+      var d = CVH.dist2(x, z, c.pos.x, c.pos.z);
+      if (d < bd) { bd = d; best = c; }
     }
-    return { x: along, z: CVH.world.roadZ(road.index) + road.dir * 3.2 };
-  },
-
-  adoptAsTraffic: function (car) {
-    const f = this.fwdOf(car);
-    const pref = car.road && car.road.axis === 'z' ? Math.sign(f.z) || 1 : Math.sign(f.x) || 1;
-    car.road = this.laneAt(car.mesh.position.x, car.mesh.position.z, pref);
-    car.driver = 'traffic';
-    car.aiTarget = null;
-  },
-
-  spawnTraffic: function (scene, count) {
-    for (let n = 0; n < count; n++) {
-      const type = CVH.pick(['sedan', 'sedan', 'sedan', 'sport', 'taxi', 'moto', 'truck']);
-      const car = this.makeCar(scene, type, type === 'taxi' ? 0xf2c230 : CVH.pick(this.COLORS));
-      const axis = CVH.rng() < 0.5 ? 'z' : 'x';
-      const road = {
-        axis: axis,
-        index: axis === 'z' ? CVH.randInt(0, 7) : CVH.randInt(0, 5),
-        dir: CVH.rng() < 0.5 ? 1 : -1
-      };
-      const along = CVH.rand(-150, 150);
-      const p = this.lanePoint(road, along);
-      const heading = road.axis === 'z' ? (road.dir > 0 ? 0 : Math.PI) : (road.dir > 0 ? Math.PI / 2 : -Math.PI / 2);
-      this.placeCar(car, p.x, p.z, heading);
-      car.road = road;
-      car.driver = 'traffic';
-    }
-  },
-
-  spawnParked: function (scene, count) {
-    const lots = [[-52, -52], [104, 52], [0, -104], [-52, 52], [104, -52]];
-    for (let n = 0; n < count; n++) {
-      const type = CVH.pick(['sedan', 'sedan', 'sport', 'moto', 'truck']);
-      const car = this.makeCar(scene, type, CVH.pick(this.COLORS));
-      if (n % 3 === 2) {
-        // Curb parking along a random avenue.
-        const i = CVH.randInt(0, 7);
-        const x = CVH.world.roadX(i) + (CVH.rng() < 0.5 ? -5.4 : 5.4);
-        const z = CVH.rand(-160, 160);
-        this.placeCar(car, x, z, CVH.rng() < 0.5 ? 0 : Math.PI);
-      } else {
-        const lot = lots[n % lots.length];
-        const x = lot[0] + CVH.rand(-13, 13), z = lot[1] + (n % 2 === 0 ? -10 : 10);
-        this.placeCar(car, x, z, CVH.rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2);
-      }
-      car.driver = null;
-    }
-  },
-
-  // ---- driving -------------------------------------------------------------------
-  // Shared arcade step for the player's car. Reads CVH.input directly.
-  drivePlayer: function (car, dt) {
-    const cfg = car.cfg;
-    const f = this.fwdOf(car);
-    const rx = -f.z, rz = f.x; // right = cross(forward, up)
-    let vf = car.vel.x * f.x + car.vel.z * f.z;
-    let vl = car.vel.x * rx + car.vel.z * rz;
-    const up = CVH.input.down('KeyW') || CVH.input.down('ArrowUp');
-    const dn = CVH.input.down('KeyS') || CVH.input.down('ArrowDown');
-    const hand = CVH.input.down('Space');
-    car.braking = false;
-    if (up) vf += cfg.accel * dt;
-    if (dn) {
-      if (vf > 0.6) { vf -= 30 * dt; car.braking = true; }
-      else vf -= cfg.accel * 0.7 * dt;
-    }
-    if (!up && !dn) vf -= vf * 0.55 * dt;              // engine braking / drag
-    vf -= vf * Math.abs(vf) * 0.006 * dt;              // aero drag
-    vf = CVH.clamp(vf, -cfg.maxR, cfg.maxF);
-    const steerIn = (CVH.input.down('KeyA') || CVH.input.down('ArrowLeft') ? 1 : 0)
-                  - (CVH.input.down('KeyD') || CVH.input.down('ArrowRight') ? 1 : 0);
-    const grip = hand ? 2.1 : cfg.grip;
-    vl *= Math.exp(-grip * dt);
-    // A steers left, D right; the turn flips naturally when reversing.
-    const speedFac = CVH.clamp(Math.abs(vf) / 7, 0, 1);
-    car.heading += steerIn * (hand ? 2.5 : 1.9) * speedFac * (vf < 0 ? -1 : 1) * dt;
-    if (hand && Math.abs(vf) > 6 && CVH.chance(0.3)) CVH.audio.skid();
-    car.steerVis = CVH.lerp(car.steerVis, steerIn * 0.45, 1 - Math.exp(-10 * dt));
-    const nf = this.fwdOf(car);
-    const nrx = -nf.z, nrz = nf.x;
-    car.vel.set(nf.x * vf + nrx * vl, 0, nf.z * vf + nrz * vl);
-    this._integrate(car, dt);
-  },
-
-  // AI steering toward car.aiTarget at up to car.aiSpeed.
-  driveAI: function (car, dt, aggressive) {
-    if (!car.aiTarget) { this._coast(car, dt); return; }
-    const p = car.mesh.position;
-    const dx = car.aiTarget.x - p.x, dz = car.aiTarget.z - p.z;
-    const dist = Math.sqrt(dx * dx + dz * dz);
-    const want = Math.atan2(dx, dz);
-    const turnRate = aggressive ? 2.6 : 1.9;
-    car.heading = CVH.angleTurn(car.heading, want, turnRate * dt);
-    const f = this.fwdOf(car);
-    let target = car.aiSpeed;
-    // Slow for the turn ahead and for anything close in front.
-    const align = Math.cos(CVH.angleWrap(want - car.heading));
-    if (align < 0.4) target = Math.min(target, 5);
-    const ahead = this._obstacleAhead(car, 8);
-    if (ahead) target = Math.min(target, ahead.speed * 0.9);
-    if (dist < 3) target = Math.min(target, 3);
-    const accel = aggressive ? 16 : 11;
-    if (car.speed < target) car.speed = Math.min(target, car.speed + accel * dt);
-    else car.speed = Math.max(target, car.speed - 22 * dt);
-    car.braking = car.speed > target + 1;
-    car.vel.set(f.x * car.speed, 0, f.z * car.speed);
-    this._integrate(car, dt);
-  },
-
-  _coast: function (car, dt) {
-    car.speed = Math.max(0, car.speed - 8 * dt);
-    const f = this.fwdOf(car);
-    car.vel.set(f.x * car.speed, 0, f.z * car.speed);
-    this._integrate(car, dt);
-  },
-
-  _integrate: function (car, dt) {
-    const p = car.mesh.position;
-    const beforeX = p.x, beforeZ = p.z;
-    p.x += car.vel.x * dt;
-    p.z += car.vel.z * dt;
-    CVH.world.collide(p, car.cfg.radius * 0.82);
-    // Hitting a building hard hurts.
-    const stopped = CVH.dist2d(p.x, p.z, beforeX + car.vel.x * dt, beforeZ + car.vel.z * dt);
-    const spd = Math.sqrt(car.vel.x * car.vel.x + car.vel.z * car.vel.z);
-    if (stopped > 0.4 && spd > 6) {
-      this.damage(car, (spd - 5) * 1.6, p);
-      car.vel.multiplyScalar(-0.22);
-      car.speed *= -0.22;
-    }
-    car.speed = Math.sqrt(car.vel.x * car.vel.x + car.vel.z * car.vel.z);
-    car.mesh.rotation.y = car.heading;
-    if (car.type === 'moto') {
-      car.mesh.rotation.z = CVH.clamp(-car.steerVis * 0.7, -0.5, 0.5);
-    }
-    // Wheels.
-    const spin = car.speed * dt / 0.34;
-    for (let i = 0; i < car.wheels.length; i++) {
-      const w = car.wheels[i];
-      w.mesh.rotation.x += spin;
-      if (i < 2) w.pivot.rotation.y = car.steerVis;
-    }
-  },
-
-  _obstacleAhead: function (car, range) {
-    const p = car.mesh.position;
-    const f = this.fwdOf(car);
-    let best = null, bestD = range;
-    const check = (other, ox, oz, ospeed) => {
-      const dx = ox - p.x, dz = oz - p.z;
-      const ahead = dx * f.x + dz * f.z;
-      if (ahead < 0.5 || ahead > bestD) return;
-      const side = Math.abs(dx * -f.z + dz * f.x);
-      if (side > 2.1) return;
-      bestD = ahead;
-      best = { speed: ospeed };
-    };
-    for (let i = 0; i < this.all.length; i++) {
-      const o = this.all[i];
-      if (o === car) continue;
-      check(o, o.mesh.position.x, o.mesh.position.z, o.speed);
-    }
-    const pl = CVH.player;
-    if (pl && !pl.inCar) check(null, pl.mesh.position.x, pl.mesh.position.z, 0);
     return best;
-  },
+  };
 
-  // Traffic brain: follow the lane, brake for obstacles, turn at junctions.
-  _traffic: function (car, dt) {
-    if (!car.road) this.adoptAsTraffic(car);
-    const p = car.mesh.position;
-    const road = car.road;
-    const along = road.axis === 'z' ? p.z : p.x;
-    const lp = this.lanePoint(road, along + road.dir * 14);
-    car.aiTarget = lp;
-    car.aiSpeed = 9.5;
-    const ahead = this._obstacleAhead(car, 9);
-    if (ahead) car.aiSpeed = Math.min(car.aiSpeed, ahead.speed * 0.92);
-    this.driveAI(car, dt, false);
-    // Junction decision.
-    car.decideCd -= dt;
-    const cross = road.axis === 'z'
-      ? Math.abs(p.z - CVH.world.roadZ(Math.round((p.z + 130) / 52))) < 2.2
-      : Math.abs(p.x - CVH.world.roadX(Math.round((p.x + 182) / 52))) < 2.2;
-    if (cross && car.decideCd <= 0) {
-      car.decideCd = 3;
-      if (CVH.rng() < 0.38) {
-        if (road.axis === 'z') {
-          const j = CVH.clamp(Math.round((p.z + 130) / 52), 0, 5);
-          car.road = { axis: 'x', index: j, dir: CVH.rng() < 0.5 ? 1 : -1 };
+  // Lane offset for right-hand traffic given the road axis and direction:
+  // avenue (travel along z): facing +z, the right-hand lane is at -x.
+  // street (travel along x): facing +x, the right-hand lane is at +z.
+  function laneFor(axis, dir) {
+    if (axis === 'z') return dir > 0 ? -3.6 : 3.6;
+    return dir > 0 ? 3.6 : -3.6;
+  }
+
+  function placeOnRoad(car, focus, minD, maxD) {
+    var W = CVH.WORLD;
+    for (var tries = 0; tries < 24; tries++) {
+      var axis = rng() < 0.5 ? 'z' : 'x';
+      var dir = rng() < 0.5 ? 1 : -1;
+      var road = axis === 'z' ? W.ROAD_XS[Math.floor(rng() * W.ROAD_XS.length)] : W.ROAD_ZS[Math.floor(rng() * W.ROAD_ZS.length)];
+      var along = CVH.randRange(rng, -195, 195);
+      var x = axis === 'z' ? road + laneFor(axis, dir) : along;
+      var z = axis === 'z' ? along : road + laneFor(axis, dir);
+      var d = CVH.dist(x, z, focus.x, focus.z);
+      if (d < minD || d > maxD) continue;
+      car.axis = axis; car.dir = dir;
+      car.lane = road + laneFor(axis, dir);
+      car.pos.x = x; car.pos.z = z;
+      car.yaw = axis === 'z' ? (dir > 0 ? 0 : Math.PI) : (dir > 0 ? Math.PI / 2 : -Math.PI / 2);
+      car.speed = 0;
+      car.turning = null;
+      return true;
+    }
+    return false;
+  }
+
+  // Take a car that was doing something else (e.g. a police cruiser whose
+  // heat just died — QA item 4) and fold it into ordinary traffic.
+  vehicles.adoptAsTraffic = function (car) {
+    var W = CVH.WORLD;
+    var bx = W.ROAD_XS[0], bz = W.ROAD_ZS[0], bdx = 1e9, bdz = 1e9, i;
+    for (i = 0; i < W.ROAD_XS.length; i++) { var dx = Math.abs(car.pos.x - W.ROAD_XS[i]); if (dx < bdx) { bdx = dx; bx = W.ROAD_XS[i]; } }
+    for (i = 0; i < W.ROAD_ZS.length; i++) { var dz = Math.abs(car.pos.z - W.ROAD_ZS[i]); if (dz < bdz) { bdz = dz; bz = W.ROAD_ZS[i]; } }
+    var fwd = CVH.headingVec(car.yaw, CVH._v1);
+    if (bdx <= bdz) {
+      car.axis = 'z'; car.dir = fwd.z >= 0 ? 1 : -1; car.lane = bx + laneFor('z', car.dir);
+    } else {
+      car.axis = 'x'; car.dir = fwd.x >= 0 ? 1 : -1; car.lane = bz + laneFor('x', car.dir);
+    }
+    car.driver = 'traffic';
+    car.cruise = 9 + rng() * 4;
+    car.turning = null;
+  };
+
+  vehicles.spawnInitial = function () {
+    rng = CVH.makeRng(CVH.seed * 31 + 7);
+    var focus = CVH.points.spawn;
+    var types = ['sedan', 'sedan', 'sport', 'taxi', 'sedan', 'moto', 'sedan', 'truck', 'sedan', 'taxi', 'sport', 'sedan', 'moto'];
+    for (var i = 0; i < types.length; i++) {
+      var c = vehicles.makeCar(types[i], 0, 0, 0, { driver: 'traffic' });
+      c.cruise = 8.5 + rng() * 4.5;
+      placeOnRoad(c, focus, 45, 170);
+    }
+    // parked cars along the avenue kerbs — stealable stock for the player
+    var spots = [
+      [8.2, -34], [-68.2, 52], [51.8, -64], [111.8, 128], [-111.8, -118],
+      [171.8, 66], [-171.8, -156], [8.2, 156], [-51.8, 22], [119.8, -24]
+    ];
+    var ptypes = ['sedan', 'sport', 'sedan', 'sedan', 'truck', 'sedan', 'moto', 'sport', 'sedan', 'sedan'];
+    for (i = 0; i < spots.length; i++) {
+      vehicles.makeCar(ptypes[i], spots[i][0], spots[i][1], 0, { driver: 'parked' });
+    }
+  };
+
+  // ------------------------------------------------------------- physics
+  function damage(car, amount) {
+    if (car.dead) return;
+    car.hp -= amount;
+    if (car.hp <= 0) {
+      car.hp = 0;
+      car.dead = true;
+      if (car.driver === 'traffic') car.driver = 'wreck';
+      CVH.fx.smoke(car.pos.x, 1.2, car.pos.z, true, 6);
+    }
+  }
+  vehicles.damage = damage;
+
+  function integrate(car, dt) {
+    var inp = car.input;
+    if (car.dead) { inp.throttle = 0; inp.brake = true; }
+    var target = inp.throttle >= 0 ? inp.throttle * car.topSpeed : inp.throttle * 9;
+    if (inp.brake) target = 0;
+    var rate;
+    if (inp.brake) rate = 34;
+    else if (Math.abs(target) > Math.abs(car.speed)) rate = car.accel;
+    else rate = car.accel * 1.7;
+    if (car.speed < target) car.speed = Math.min(target, car.speed + rate * dt);
+    else car.speed = Math.max(target, car.speed - rate * dt);
+
+    var sf = CVH.clamp(car.speed / 5, -1, 1);
+    if (Math.abs(car.speed) > 0.25) {
+      var steerRate = 1.85 * (inp.drift ? 1.55 : 1);
+      car.yaw += inp.steer * steerRate * dt * sf;
+    }
+    car.steerVis = CVH.lerp(car.steerVis, inp.steer * 0.42, Math.min(1, dt * 10));
+
+    var fwd = CVH.headingVec(car.yaw, CVH._v1);
+    car.pos.x += fwd.x * car.speed * dt;
+    car.pos.z += fwd.z * car.speed * dt;
+
+    // building / world collision for the cars that leave the road network
+    if (car.driver === 'player' || car.driver === 'police') {
+      var before = car.speed;
+      var hit = CVH.world.collide(car.pos, car.radius * 0.72);
+      if (hit && Math.abs(before) > 6.5 && car.crashCd <= 0) {
+        car.crashCd = 0.35;
+        damage(car, Math.abs(before) * 1.1);
+        CVH.fx.sparks(car.pos.x + fwd.x * 2, 0.7, car.pos.z + fwd.z * 2, 10);
+        if (car.driver === 'player') {
+          CVH.fx.addShake(0.35);
+          CVH.audio.crash(Math.abs(before) > 13);
         } else {
-          const i = CVH.clamp(Math.round((p.x + 182) / 52), 0, 7);
-          car.road = { axis: 'z', index: i, dir: CVH.rng() < 0.5 ? 1 : -1 };
+          CVH.audio.crash(false);
+        }
+        car.speed = before * 0.3;
+      } else if (hit) {
+        car.speed *= 0.6;
+      }
+    }
+    car.crashCd = Math.max(0, car.crashCd - dt);
+
+    // visuals
+    car.mesh.position.copy(car.pos);
+    car.mesh.rotation.y = car.yaw;
+    if (car.type === 'moto') car.mesh.rotation.z = -car.steerVis * 0.5;
+    car.wheelSpin += car.speed * dt / 0.34;
+    for (var i = 0; i < car.wheels.length; i++) car.wheels[i].rotation.x = car.wheelSpin;
+    for (i = 0; i < car.pivots.length; i++) car.pivots[i].rotation.y = car.steerVis;
+    var braking = inp.brake || (inp.throttle < -0.05 && car.speed > 0.5) || (Math.abs(inp.throttle) < 0.05 && car.speed > 2);
+    car.brakeMat.emissiveIntensity = braking ? 2.2 : 0.35;
+    if (car.barMats) {
+      var ph = Math.sin(CVH.time * 11 + car.pos.x);
+      car.barMats[0].emissiveIntensity = ph > 0 ? 3.2 : 0.15;
+      car.barMats[1].emissiveIntensity = ph > 0 ? 0.15 : 3.2;
+    }
+    if (car.dead) {
+      car.smokeT -= dt;
+      if (car.smokeT <= 0) {
+        car.smokeT = 0.14;
+        CVH.fx.smoke(car.pos.x, 1.1, car.pos.z, true, 1);
+      }
+    }
+  }
+
+  // car-vs-car: soft push-apart with damage on hard hits
+  function collideCars(focus) {
+    for (var i = 0; i < cars.length; i++) {
+      var a = cars[i];
+      if (a.driver === 'parked' || a.driver === 'wreck') { /* still an obstacle */ }
+      for (var j = i + 1; j < cars.length; j++) {
+        var b = cars[j];
+        var rr = a.radius + b.radius;
+        var d2 = CVH.dist2(a.pos.x, a.pos.z, b.pos.x, b.pos.z);
+        if (d2 > rr * rr || d2 === 0) continue;
+        var d = Math.sqrt(d2);
+        var nx = (b.pos.x - a.pos.x) / d, nz = (b.pos.z - a.pos.z) / d;
+        var push = (rr - d) / 2 + 0.02;
+        var aMovable = a.driver !== 'parked' && a.driver !== 'wreck';
+        var bMovable = b.driver !== 'parked' && b.driver !== 'wreck';
+        if (aMovable) { a.pos.x -= nx * push; a.pos.z -= nz * push; }
+        if (bMovable) { b.pos.x += nx * push; b.pos.z += nz * push; }
+        var rel = Math.abs(a.speed - b.speed);
+        if (rel > 5) {
+          damage(a, rel * 0.8);
+          damage(b, rel * 0.8);
+          CVH.fx.sparks((a.pos.x + b.pos.x) / 2, 0.7, (a.pos.z + b.pos.z) / 2, 8);
+          if (a.driver === 'player' || b.driver === 'player') {
+            CVH.fx.addShake(0.3);
+            CVH.audio.crash(rel > 11);
+            var other = a.driver === 'player' ? b : a;
+            if (CVH.police) {
+              if (other.type === 'police' && other.driver === 'police') CVH.police.reportCrime(a.pos.x, a.pos.z, 55, true);
+              else CVH.police.reportCrime(a.pos.x, a.pos.z, 22, false);
+            }
+          }
+          a.speed *= 0.55; b.speed *= 0.55;
         }
       }
     }
-    // Gridlock breaker: a car stuck for five seconds re-enters elsewhere.
-    if (car.speed < 0.4) {
-      car.blockedT += dt;
-      if (car.blockedT > 5) {
-        car.blockedT = 0;
-        const pl = CVH.player;
-        for (let tries = 0; tries < 8; tries++) {
-          const r2 = { axis: CVH.rng() < 0.5 ? 'z' : 'x', index: 0, dir: CVH.rng() < 0.5 ? 1 : -1 };
-          r2.index = r2.axis === 'z' ? CVH.randInt(0, 7) : CVH.randInt(0, 5);
-          const pt = this.lanePoint(r2, CVH.rand(-150, 150));
-          if (pl && CVH.dist2d(pt.x, pt.z, pl.mesh.position.x, pl.mesh.position.z) < 80) continue;
-          const heading = r2.axis === 'z' ? (r2.dir > 0 ? 0 : Math.PI) : (r2.dir > 0 ? Math.PI / 2 : -Math.PI / 2);
-          this.placeCar(car, pt.x, pt.z, heading);
-          car.road = r2;
+  }
+
+  // --------------------------------------------------------- traffic AI
+  function trafficThink(car, dt, focus) {
+    var inp = car.input;
+    if (car.dead) { inp.throttle = 0; inp.brake = true; return; }
+
+    // recycle far-away traffic so the player's streets stay populated
+    var dFocus = CVH.dist(car.pos.x, car.pos.z, focus.x, focus.z);
+    if (dFocus > 200) { placeOnRoad(car, focus, 80, 140); return; }
+
+    // obstacle scan: anything (car or pedestrian) close ahead in my lane
+    var fwd = CVH.headingVec(car.yaw, CVH._v1);
+    var blocked = false, slowAhead = false;
+    var k, o;
+    for (k = 0; k < cars.length; k++) {
+      o = cars[k];
+      if (o === car) continue;
+      var rx = o.pos.x - car.pos.x, rz = o.pos.z - car.pos.z;
+      var ahead = rx * fwd.x + rz * fwd.z;
+      var lat = Math.abs(rx * fwd.z - rz * fwd.x);
+      if (ahead > 0 && ahead < 10 && lat < 2.1) { blocked = true; break; }
+      if (ahead >= 10 && ahead < 17 && lat < 2.1) slowAhead = true;
+    }
+    if (!blocked && CVH.peds) {
+      for (k = 0; k < CVH.peds.length; k++) {
+        var p = CVH.peds[k];
+        if (p.state === 'down') continue;
+        var prx = p.x - car.pos.x, prz = p.z - car.pos.z;
+        var pa = prx * fwd.x + prz * fwd.z;
+        var pl = Math.abs(prx * fwd.z - prz * fwd.x);
+        if (pa > 0 && pa < 6.5 && pl < 1.6) { blocked = true; break; }
+      }
+    }
+
+    var desired = blocked ? 0 : (slowAhead ? car.cruise * 0.45 : car.cruise);
+    inp.brake = desired === 0 && car.speed > 0.8;
+    inp.throttle = CVH.clamp(desired / car.topSpeed, 0, 1);
+
+    // gridlock breaker: stuck too long -> quietly respawn elsewhere
+    if (Math.abs(car.speed) < 0.4 && desired > 0) {
+      car.stuckT += dt;
+      if (car.stuckT > 4.5) { car.stuckT = 0; placeOnRoad(car, focus, 70, 150); return; }
+    } else car.stuckT = 0;
+
+    // steering: chase a point on my lane a little ahead; turns at
+    // intersections swing wide toward the exit lane first
+    car.turnCd -= dt;
+    var W = CVH.WORLD;
+    if (!car.turning && car.turnCd <= 0) {
+      var cross = car.axis === 'z' ? W.ROAD_ZS : W.ROAD_XS;
+      var along = car.axis === 'z' ? car.pos.z : car.pos.x;
+      for (k = 0; k < cross.length; k++) {
+        if (Math.abs(along - cross[k]) < 1.4 && rng() < 0.012 + 0.3 * dt) {
+          var nd = rng() < 0.5 ? 1 : -1;
+          var naxis = car.axis === 'z' ? 'x' : 'z';
+          car.turning = {
+            axis: naxis, dir: nd,
+            fixed: cross[k] + laneFor(naxis, nd),
+            exitX: naxis === 'x' ? car.pos.x + nd * 16 : cross[k] + laneFor(naxis, nd),
+            exitZ: naxis === 'z' ? car.pos.z + nd * 16 : cross[k] + laneFor(naxis, nd)
+          };
+          car.turnCd = 4;
           break;
         }
       }
-    } else car.blockedT = 0;
-  },
-
-  damage: function (car, amount, atPos) {
-    if (car.dead) return;
-    car.health -= amount;
-    if (atPos) CVH.fx.sparks(atPos, amount > 8 ? 14 : 6);
-    if (car.health <= 0) {
-      car.health = 0;
-      car.dead = true;
-      car.speed = 0;
-      CVH.fx.smoke(car.mesh.position);
     }
-  },
-
-  update: function (dt) {
-    const pl = CVH.player;
-    for (let i = 0; i < this.all.length; i++) {
-      const car = this.all[i];
-      if (car.dead) {
-        car.smokeT -= dt;
-        if (car.smokeT <= 0) { car.smokeT = 0.14; CVH.fx.smoke(car.mesh.position); }
-        car.vel.multiplyScalar(Math.max(0, 1 - 3 * dt));
-        car.mesh.position.x += car.vel.x * dt;
-        car.mesh.position.z += car.vel.z * dt;
-        continue;
+    var tx, tz;
+    if (car.turning) {
+      tx = car.turning.exitX; tz = car.turning.exitZ;
+      var travelYaw = car.turning.axis === 'z' ? (car.turning.dir > 0 ? 0 : Math.PI) : (car.turning.dir > 0 ? Math.PI / 2 : -Math.PI / 2);
+      if (Math.abs(CVH.angleDelta(car.yaw, travelYaw)) < 0.12) {
+        car.axis = car.turning.axis;
+        car.dir = car.turning.dir;
+        car.lane = car.turning.fixed;
+        car.turning = null;
       }
-      if (car.driver === 'traffic') this._traffic(car, dt);
-      else if (car.driver === 'police') this.driveAI(car, dt, true);
-      else if (car.driver === 'player') this.drivePlayer(car, dt);
-      // A parked car that was shunted rolls to a stop.
-      if (car.driver === null && car.speed > 0.05) this._coast(car, dt);
-      if (car.hitPlayerCd > 0) car.hitPlayerCd -= dt;
-      // Running the player down (AI cars only; the player's own car is
-      // handled against pedestrians in player.js).
-      if (pl && !pl.inCar && car.driver !== 'player' && car.speed > 4 && car.hitPlayerCd <= 0) {
-        const d = CVH.dist2d(car.mesh.position.x, car.mesh.position.z, pl.mesh.position.x, pl.mesh.position.z);
-        if (d < car.cfg.radius + 0.5) {
-          car.hitPlayerCd = 1.2;
-          pl.takeDamage(16, car.mesh.position);
-          CVH.audio.crash(0.25);
-        }
-      }
+    } else if (car.axis === 'z') {
+      tx = car.lane; tz = car.pos.z + car.dir * 11;
+    } else {
+      tx = car.pos.x + car.dir * 11; tz = car.lane;
     }
-    this._carCollisions();
-    this.updateVisuals(0);
-  },
-
-  _carCollisions: function () {
-    const pl = CVH.player;
-    for (let i = 0; i < this.all.length; i++) {
-      for (let j = i + 1; j < this.all.length; j++) {
-        const a = this.all[i], b = this.all[j];
-        const pa = a.mesh.position, pb = b.mesh.position;
-        const rr = a.cfg.radius + b.cfg.radius;
-        const dx = pb.x - pa.x, dz = pb.z - pa.z;
-        const d2 = dx * dx + dz * dz;
-        if (d2 > rr * rr || d2 < 1e-6) continue;
-        const d = Math.sqrt(d2);
-        const nx = dx / d, nz = dz / d;
-        const push = (rr - d) / 2;
-        if (!a.dead) { pa.x -= nx * push; pa.z -= nz * push; }
-        if (!b.dead) { pb.x += nx * push; pb.z += nz * push; }
-        const rvx = b.vel.x - a.vel.x, rvz = b.vel.z - a.vel.z;
-        const closing = -(rvx * nx + rvz * nz);
-        if (closing > 2.5) {
-          const dmg = (closing - 2) * 2.0;
-          this.damage(a, dmg, pa);
-          this.damage(b, dmg, pb);
-          const mid = { x: (pa.x + pb.x) / 2, y: 0.6, z: (pa.z + pb.z) / 2 };
-          CVH.fx.sparks(mid, 12);
-          const impulse = closing * 0.42;
-          a.vel.x -= nx * impulse; a.vel.z -= nz * impulse;
-          b.vel.x += nx * impulse; b.vel.z += nz * impulse;
-          if (pl && (pl.inCar === a || pl.inCar === b)) {
-            CVH.fx.shake(CVH.clamp(closing * 0.03, 0.08, 0.4));
-            CVH.audio.crash(CVH.clamp(closing * 0.05, 0.1, 0.55));
-          } else if (pl && CVH.dist2d(mid.x, mid.z, pl.mesh.position.x, pl.mesh.position.z) < 26) {
-            CVH.audio.crash(CVH.clamp(closing * 0.03, 0.05, 0.3));
-          }
-          if ((a.driver === 'player' || b.driver === 'player')) {
-            const other = a.driver === 'player' ? b : a;
-            if (other.type === 'police') CVH.police.reportCrime('hitpolice', other.mesh.position, true);
-          }
-        }
-      }
-    }
-  },
-
-  // Light bars, brake lights, headlight cones. Safe to run while frozen.
-  updateVisuals: function () {
-    const t = performance.now() / 1000;
-    const dusk = CVH.world.dusk > 0.35;
-    for (let i = 0; i < this.all.length; i++) {
-      const car = this.all[i];
-      if (car.lightMats) {
-        const active = !car.dead && (car.driver === 'police' || car.driver === 'player');
-        const ph = Math.floor(t * 2.6) % 2;
-        car.lightMats.red.emissiveIntensity = active ? (ph === 0 ? 2.6 : 0.15) : 0.15;
-        car.lightMats.blue.emissiveIntensity = active ? (ph === 1 ? 2.6 : 0.15) : 0.15;
-      }
-      if (car.brakeMat) car.brakeMat.emissiveIntensity = car.braking ? 2.2 : 0.25;
-      for (let k = 0; k < car.cones.length; k++) car.cones[k].visible = dusk && !car.dead && car.driver !== null;
-    }
+    var wantYaw = Math.atan2(tx - car.pos.x, tz - car.pos.z);
+    inp.steer = CVH.clamp(CVH.angleDelta(car.yaw, wantYaw) * 1.6, -1, 1);
   }
-};
+
+  // -------------------------------------------------------------- update
+  vehicles.update = function (dt, focus) {
+    if (coneMat) coneMat.opacity = CVH.dusk * 0.34;
+    var i;
+    for (i = 0; i < cars.length; i++) {
+      var car = cars[i];
+      if (car.driver === 'traffic') trafficThink(car, dt, focus);
+      if (car.driver !== 'parked' && car.driver !== 'wreck') integrate(car, dt);
+      else {
+        // parked/wrecked cars still flash nothing and sit still, but a
+        // wreck keeps smoking
+        if (car.dead) {
+          car.smokeT -= dt;
+          if (car.smokeT <= 0) { car.smokeT = 0.16; CVH.fx.smoke(car.pos.x, 1.1, car.pos.z, true, 1); }
+        }
+        car.mesh.position.copy(car.pos);
+      }
+    }
+    collideCars(focus);
+  };
+})();

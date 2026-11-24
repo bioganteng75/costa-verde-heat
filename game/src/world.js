@@ -1,607 +1,565 @@
-'use strict';
-// Costa Verde Heat 3D — the city itself. A road grid (8 avenues x 6 streets)
-// of low-poly blocks with canvas-texture facades whose windows light up at
-// dusk, named landmarks, a beach and marina on the east shore, cash packages,
-// weapon pickups, food stands, the Pay 'n Spray, and a ~7 minute day cycle.
-// All layout is derived from one seeded RNG, so a seed always builds the
-// same city. Collision is circle-vs-AABB against `colliders`.
+// world.js — Costa Verde itself: the road grid, city blocks with canvas-
+// textured facades, the landmark buildings and their signs, beach,
+// marina pier and water, palms, lamps, food stands, cash packages and
+// weapon pickups. Owns CVH.world, CVH.points and the building collider
+// list every other system collides / audits against. Also drives the
+// ~7-minute day cycle that drifts into warm dusk.
+(function () {
+  'use strict';
 
-CVH.world = {
-  PITCH: 52,
-  ROADW: 13,
-  colliders: [],
-  packages: [],
-  stands: [],
-  pickups: [],
-  boats: [],
-  facadeMats: [],
-  lampHeadMat: null,
-  sun: null,
-  hemi: null,
-  water: null,
-  foam: null,
-  phase: 0.2,       // 0..1 across the whole day cycle
-  dusk: 0,          // 0 day .. 1 full dusk, drives lamps/windows/headlights
-  paynspray: null,  // {minX,maxX,minZ,maxZ} service pad
-  pier: { x0: 226, x1: 272, z: -26 },
-  safehousePos: { x: -156, z: 122 },
-  policePos: { x: -104, z: 20 },
-  hospitalPos: { x: -104, z: -84 },
-  bounds: { minX: -228, maxX: 246, minZ: -172, maxZ: 172 },
+  var CVH = window.CVH = window.CVH || {};
+  var THREE = window.THREE;
 
-  roadX: function (i) { return -182 + i * 52; },
-  roadZ: function (j) { return -130 + j * 52; },
-  cellCX: function (i) { return (this.roadX(i) + this.roadX(i + 1)) / 2; },
-  cellCZ: function (j) { return (this.roadZ(j) + this.roadZ(j + 1)) / 2; },
+  // ------------------------------------------------------------ layout
+  var ROAD_XS = [-180, -120, -60, 0, 60, 120, 180];   // avenues (run along z)
+  var ROAD_ZS = [-150, -90, -30, 30, 90, 150];        // streets (run along x)
+  var ROAD_W = 15;
+  var MINX = -238, MAXX = 238, MINZ = -208, MAXZ = 208;
+  var WATER_X = 250;                                   // waterline (east)
+  var PIER = { x0: 234, x1: 276, z0: -34, z1: -6 };    // marina pier deck
 
-  // ---- canvas texture helpers -------------------------------------------------
-  _canvas: function (w, h) {
-    const c = document.createElement('canvas');
+  CVH.WORLD = {
+    ROAD_XS: ROAD_XS, ROAD_ZS: ROAD_ZS, ROAD_W: ROAD_W,
+    MINX: MINX, MAXX: MAXX, MINZ: MINZ, MAXZ: MAXZ,
+    WATER_X: WATER_X, PIER: PIER
+  };
+
+  var colliders = CVH.colliders = [];   // {x0,x1,z0,z1} buildings & kiosks
+  var facadeMats = [];
+  var lampMat = null;
+  var waterMat = null, waterTex = null;
+  var boats = [];
+  var hotelSignMat = null;
+
+  CVH.dayT = 0.3;      // 0..1 across ~7 minutes
+  CVH.dusk = 0;        // 0 = full day, 1 = full dusk glow
+
+  // ------------------------------------------------------------- points
+  // Every gameplay-critical coordinate in the city. All of them sit on
+  // roads, sidewalks, aprons, sand or the pier — never inside a block —
+  // and the playtest audits each one against the colliders (fix 5).
+  var points = CVH.points = {
+    spawn:      { x: -150, z: 96 },
+    porch:      { x: -150, z: 104 },   // Marisol Vega, at the safehouse
+    safehouse:  { x: -150, z: 104 },
+    police:     { x: -90,  z: -102 },
+    hospital:   { x: 30,   z: -102 },
+    pnsPad:     { x: 90,   z: 100 },
+    beachDrop:  { x: 228,  z: 40 },
+    pierEnd:    { x: 264,  z: -20 },
+    taxiSpots: [
+      { x: 10, z: 40 }, { x: -50, z: 40 }, { x: 70, z: -20 }, { x: 130, z: 100 },
+      { x: -110, z: -80 }, { x: -170, z: 20 }, { x: 190, z: 40 }, { x: 40, z: 160 },
+      { x: -40, z: -140 }, { x: 100, z: -140 }, { x: -160, z: -140 }, { x: 190, z: -100 }
+    ]
+  };
+
+  // ------------------------------------------------------- canvas help
+  function canvasTex(w, h, draw, repX, repY) {
+    var c = document.createElement('canvas');
     c.width = w; c.height = h;
-    return c;
-  },
+    draw(c.getContext('2d'), w, h);
+    var t = new THREE.CanvasTexture(c);
+    if (repX || repY) {
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      t.repeat.set(repX || 1, repY || 1);
+    }
+    t.anisotropy = 2;
+    return t;
+  }
 
-  facadeTextures: function (wall, trim) {
-    const rng = CVH.rng;
-    const mapC = this._canvas(128, 256);
-    const g = mapC.getContext('2d');
-    g.fillStyle = wall; g.fillRect(0, 0, 128, 256);
-    g.fillStyle = trim; g.fillRect(0, 0, 128, 10); g.fillRect(0, 246, 128, 10);
-    const litC = this._canvas(128, 256);
-    const lg = litC.getContext('2d');
-    lg.fillStyle = '#000000'; lg.fillRect(0, 0, 128, 256);
-    for (let r = 0; r < 10; r++) {
-      for (let c = 0; c < 5; c++) {
-        const x = 10 + c * 23, y = 18 + r * 23;
-        g.fillStyle = 'rgba(24,32,44,0.9)';
-        g.fillRect(x, y, 14, 15);
-        g.fillStyle = 'rgba(160,200,230,0.35)';
-        g.fillRect(x, y, 14, 5);
-        if (rng() < 0.46) {
-          lg.fillStyle = rng() < 0.8 ? '#ffc46b' : '#ffe9b0';
-          lg.fillRect(x, y, 14, 15);
-        }
+  function signTexture(text, bg, fg, sub) {
+    return canvasTex(512, 128, function (g, w, h) {
+      g.fillStyle = bg; g.fillRect(0, 0, w, h);
+      g.strokeStyle = fg; g.lineWidth = 6; g.strokeRect(8, 8, w - 16, h - 16);
+      g.fillStyle = fg;
+      g.font = 'bold 58px Arial, sans-serif';
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(text, w / 2, sub ? h / 2 - 16 : h / 2 + 2);
+      if (sub) {
+        g.font = 'bold 26px Arial, sans-serif';
+        g.fillText(sub, w / 2, h / 2 + 38);
       }
-    }
-    const map = new THREE.CanvasTexture(mapC);
-    const emissiveMap = new THREE.CanvasTexture(litC);
-    return { map: map, emissiveMap: emissiveMap };
-  },
+    });
+  }
 
-  signTexture: function (text, bg, fg, sub) {
-    const c = this._canvas(512, 128);
-    const g = c.getContext('2d');
-    g.fillStyle = bg; g.fillRect(0, 0, 512, 128);
-    g.strokeStyle = fg; g.lineWidth = 6; g.strokeRect(8, 8, 496, 112);
-    g.fillStyle = fg;
-    g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.font = 'bold 52px Arial, sans-serif';
-    g.fillText(text, 256, sub ? 48 : 64);
-    if (sub) {
-      g.font = 'bold 26px Arial, sans-serif';
-      g.fillText(sub, 256, 96);
+  // ------------------------------------------------------------ facades
+  var FACADE_BASES = ['#c9b8a3', '#a8bfc9', '#d6c290', '#b7a6c4', '#9fc4ae', '#d0a08e'];
+  function makeFacades(rng) {
+    for (var v = 0; v < 6; v++) {
+      (function (v) {
+        var base = FACADE_BASES[v];
+        var cols = 6, rows = 10;
+        var map = canvasTex(128, 256, function (g, w, h) {
+          g.fillStyle = base; g.fillRect(0, 0, w, h);
+          g.fillStyle = 'rgba(0,0,0,0.12)'; g.fillRect(0, h - 14, w, 14);
+          var cw = w / cols, ch = h / rows;
+          for (var x = 0; x < cols; x++) for (var y = 0; y < rows; y++) {
+            g.fillStyle = 'rgba(40,50,66,0.85)';
+            g.fillRect(x * cw + 3, y * ch + 4, cw - 6, ch - 8);
+          }
+        });
+        var litSeed = CVH.makeRng(900 + v);
+        var emis = canvasTex(128, 256, function (g, w, h) {
+          g.fillStyle = '#000'; g.fillRect(0, 0, w, h);
+          var cw = w / cols, ch = h / rows;
+          for (var x = 0; x < cols; x++) for (var y = 0; y < rows; y++) {
+            if (litSeed() < 0.42) {
+              g.fillStyle = litSeed() < 0.5 ? '#ffca7a' : '#ffe9b0';
+              g.fillRect(x * cw + 3, y * ch + 4, cw - 6, ch - 8);
+            }
+          }
+        });
+        var m = new THREE.MeshLambertMaterial({
+          map: map, emissiveMap: emis, emissive: new THREE.Color(0xffbe78), emissiveIntensity: 0
+        });
+        facadeMats.push(m);
+      })(v);
     }
-    return new THREE.CanvasTexture(c);
-  },
+  }
 
-  groundTexture: function () {
-    const c = this._canvas(2048, 1440);
-    const g = c.getContext('2d');
-    const W = 2048, H = 1440;
-    const px = function (x) { return (x + 240) / 540 * W; };
-    const pz = function (z) { return (z + 190) / 380 * H; };
-    // Base: asphalt.
-    g.fillStyle = '#43484e'; g.fillRect(0, 0, W, H);
-    // Sand beach on the east shore.
-    const sandGrad = g.createLinearGradient(px(204), 0, px(252), 0);
-    sandGrad.addColorStop(0, '#d9c491');
-    sandGrad.addColorStop(1, '#efe0ae');
-    g.fillStyle = sandGrad;
-    g.fillRect(px(204), 0, px(252) - px(204), H);
-    // Sand speckle.
-    g.fillStyle = 'rgba(160,130,80,0.25)';
-    for (let i = 0; i < 900; i++) {
-      g.fillRect(px(206) + CVH.rng() * (px(252) - px(206)), CVH.rng() * H, 3, 3);
-    }
-    // Block interiors: sidewalk slabs with a slightly darker lot inside.
-    for (let i = 0; i < 7; i++) {
-      for (let j = 0; j < 5; j++) {
-        const x0 = this.roadX(i) + this.ROADW / 2, x1 = this.roadX(i + 1) - this.ROADW / 2;
-        const z0 = this.roadZ(j) + this.ROADW / 2, z1 = this.roadZ(j + 1) - this.ROADW / 2;
-        g.fillStyle = '#8f959a';
-        g.fillRect(px(x0), pz(z0), px(x1) - px(x0), pz(z1) - pz(z0));
-        g.fillStyle = '#7e858b';
-        g.fillRect(px(x0 + 3), pz(z0 + 3), px(x1 - 3) - px(x0 + 3), pz(z1 - 3) - pz(z0 + 3));
-      }
-    }
-    // Road paint: dashed centre lines.
-    g.fillStyle = '#e8e4d2';
-    for (let i = 0; i < 8; i++) {
-      const x = px(this.roadX(i));
-      for (let z = -168; z < 168; z += 12) g.fillRect(x - 2, pz(z), 4, pz(z + 6) - pz(z));
-    }
-    for (let j = 0; j < 6; j++) {
-      const z = pz(this.roadZ(j));
-      for (let x = -220; x < 200; x += 12) g.fillRect(px(x), z - 2, px(x + 6) - px(x), 4);
-    }
-    // Crosswalks at intersections.
-    g.fillStyle = 'rgba(240,240,235,0.75)';
-    for (let i = 0; i < 8; i++) {
-      for (let j = 0; j < 6; j++) {
-        const cx = px(this.roadX(i)), cz = pz(this.roadZ(j));
-        for (let s = -2; s <= 2; s++) {
-          g.fillRect(cx - 16, cz + s * 7 - 2, 32, 4);
-        }
-      }
-    }
-    const tex = new THREE.CanvasTexture(c);
-    tex.anisotropy = 4;
-    return tex;
-  },
+  function box(w, h, d, mat, x, y, z, parent, shadow) {
+    var mesh = new THREE.Mesh(CVH._unitBox, mat);
+    mesh.scale.set(w, h, d);
+    mesh.position.set(x, y, z);
+    if (shadow !== false) { mesh.castShadow = true; mesh.receiveShadow = true; }
+    (parent || CVH.scene).add(mesh);
+    return mesh;
+  }
 
-  // ---- build -------------------------------------------------------------------
-  build: function (scene) {
-    const rng = CVH.rng;
-    this.colliders = [];
-    this.packages = [];
-    this.stands = [];
-    this.pickups = [];
-    this.boats = [];
-    this.facadeMats = [];
+  function addCollider(x, z, w, d) {
+    colliders.push({ x0: x - w / 2, x1: x + w / 2, z0: z - d / 2, z1: z + d / 2 });
+  }
 
-    // Lights.
-    this.hemi = new THREE.HemisphereLight(0xcfe6ff, 0x8a7a5a, 0.75);
-    scene.add(this.hemi);
-    this.sun = new THREE.DirectionalLight(0xfff2d8, 1.15);
-    this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(1024, 1024);
-    this.sun.shadow.camera.left = -70; this.sun.shadow.camera.right = 70;
-    this.sun.shadow.camera.top = 70; this.sun.shadow.camera.bottom = -70;
-    this.sun.shadow.camera.far = 320;
-    this.sun.shadow.bias = -0.0008;
-    scene.add(this.sun);
-    scene.add(this.sun.target);
-    scene.fog = new THREE.Fog(0xbfd9e8, 120, 420);
+  function signMesh(text, bg, fg, w, h, x, y, z, ry, sub) {
+    var mat = new THREE.MeshBasicMaterial({ map: signTexture(text, bg, fg, sub) });
+    var m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+    m.position.set(x, y, z);
+    m.rotation.y = ry || 0;
+    CVH.scene.add(m);
+    return mat;
+  }
 
-    // Ground.
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(540, 380),
-      new THREE.MeshLambertMaterial({ map: this.groundTexture() })
-    );
+  // -------------------------------------------------------------- build
+  var world = CVH.world = {
+    packages: [],
+    pickups: [],
+    stands: [],
+    sun: null,
+    hemi: null
+  };
+
+  world.build = function (scene) {
+    CVH._unitBox = new THREE.BoxGeometry(1, 1, 1);
+    var rng = CVH.makeRng(CVH.seed * 7919 + 13);
+    makeFacades(rng);
+
+    // -- ground base (sand colour everywhere; the city slab sits on top)
+    var ground = new THREE.Mesh(new THREE.PlaneGeometry(760, 520),
+      new THREE.MeshLambertMaterial({ color: 0xd9c49a }));
     ground.rotation.x = -Math.PI / 2;
-    ground.position.set(30, 0, 0);
+    ground.position.set(40, -0.05, 0);
     ground.receiveShadow = true;
     scene.add(ground);
 
-    // Water + foam line.
-    const waterMat = new THREE.MeshLambertMaterial({ color: 0x2b6f96, transparent: true, opacity: 0.94 });
-    this.water = new THREE.Mesh(new THREE.PlaneGeometry(190, 380), waterMat);
-    this.water.rotation.x = -Math.PI / 2;
-    this.water.position.set(252 + 95, 0.12, 0);
-    scene.add(this.water);
-    this.foam = new THREE.Mesh(
-      new THREE.PlaneGeometry(2.6, 380),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 })
-    );
-    this.foam.rotation.x = -Math.PI / 2;
-    this.foam.position.set(251, 0.16, 0);
-    scene.add(this.foam);
-
-    this._buildBlocks(scene);
-    this._buildMarina(scene);
-    this._buildVegetation(scene);
-    this._buildLamps(scene);
-    this._buildPickups(scene);
-    this.applyTimeOfDay(scene);
-  },
-
-  _addCollider: function (cx, cz, w, d) {
-    this.colliders.push({ minX: cx - w / 2, maxX: cx + w / 2, minZ: cz - d / 2, maxZ: cz + d / 2 });
-  },
-
-  _building: function (scene, cx, cz, w, d, h, mat, roofMat) {
-    const geo = CVH.world._unitBox || (CVH.world._unitBox = new THREE.BoxGeometry(1, 1, 1));
-    const m = new THREE.Mesh(geo, mat);
-    m.scale.set(w, h, d);
-    m.position.set(cx, h / 2, cz);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    scene.add(m);
-    const roof = new THREE.Mesh(geo, roofMat);
-    roof.scale.set(w + 0.7, 0.5, d + 0.7);
-    roof.position.set(cx, h + 0.25, cz);
-    scene.add(roof);
-    this._addCollider(cx, cz, w, d);
-    return m;
-  },
-
-  _sign: function (scene, text, sub, bg, fg, x, y, z, rotY, w) {
-    const tex = this.signTexture(text, bg, fg, sub);
-    const m = new THREE.Mesh(
-      new THREE.PlaneGeometry(w || 11, (w || 11) / 4),
-      new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide })
-    );
-    m.position.set(x, y, z);
-    m.rotation.y = rotY;
-    scene.add(m);
-    return m;
-  },
-
-  _buildBlocks: function (scene) {
-    const rng = CVH.rng;
-    const palettes = [
-      ['#c9b8a3', '#8a7a63'], ['#b7c4c9', '#6f8288'], ['#d8c9a8', '#97865f'],
-      ['#c4a49a', '#8a6a5e'], ['#aebfc0', '#71868a'], ['#e0d3b8', '#a08d64']
-    ];
-    const mats = palettes.map((p) => {
-      const t = this.facadeTextures(p[0], p[1]);
-      const m = new THREE.MeshLambertMaterial({
-        map: t.map, emissive: 0xffc46b, emissiveMap: t.emissiveMap, emissiveIntensity: 0
-      });
-      this.facadeMats.push(m);
-      return m;
-    });
-    const roofMat = new THREE.MeshLambertMaterial({ color: 0x4c4640 });
-
-    const LANDMARKS = {
-      '1,2': 'police', '1,0': 'hospital', '6,1': 'hotel', '3,2': 'bank',
-      '4,4': 'paynspray', '6,3': 'cafe', '0,4': 'safehouse'
-    };
-    const LOTS = { '2,1': true, '5,3': true, '3,0': true };
-    const PARKS = { '2,3': true, '5,1': true };
-
-    for (let i = 0; i < 7; i++) {
-      for (let j = 0; j < 5; j++) {
-        const key = i + ',' + j;
-        const cx = this.cellCX(i), cz = this.cellCZ(j);
-        const kind = LANDMARKS[key];
-        if (kind) { this._landmark(scene, kind, cx, cz, mats, roofMat); continue; }
-        if (LOTS[key]) { this._parkingLot(scene, cx, cz); continue; }
-        if (PARKS[key]) { this._park(scene, cx, cz); continue; }
-        // Ordinary tower: taller toward the middle of the city.
-        const centrality = 1 - Math.min(1, Math.hypot(cx, cz) / 240);
-        const w = CVH.rand(24, 33), d = CVH.rand(24, 33);
-        const h = CVH.rand(10, 20) + centrality * CVH.rand(14, 30);
-        this._building(scene, cx, cz, w, d, h, CVH.pick(mats), roofMat);
-      }
-    }
-  },
-
-  _landmark: function (scene, kind, cx, cz, mats, roofMat) {
-    const white = new THREE.MeshLambertMaterial({ color: 0xe8e6df });
-    if (kind === 'police') {
-      const m = new THREE.MeshLambertMaterial({ color: 0x9fb2c8 });
-      this._building(scene, cx, cz, 30, 26, 13, m, roofMat);
-      this._sign(scene, 'POLICE', 'COSTA VERDE PD', '#16283f', '#bcd6f5', cx, 10.5, cz + 13.4, 0, 13);
-    } else if (kind === 'hospital') {
-      this._building(scene, cx, cz, 32, 26, 15, white, roofMat);
-      this._sign(scene, 'HOSPITAL', 'ST. MARINA GENERAL', '#eef0ee', '#c22f2f', cx, 12, cz + 13.4, 0, 14);
-    } else if (kind === 'hotel') {
-      const m = new THREE.MeshLambertMaterial({ color: 0xf0dfba });
-      this._building(scene, cx, cz, 30, 28, 56, m, roofMat);
-      this._sign(scene, 'HOTEL SOL', '★ ★ ★ ★ ★', '#3a2c12', '#ffd977', cx + 15.4, 40, cz, Math.PI / 2, 16);
-      this._sign(scene, 'HOTEL SOL', null, '#3a2c12', '#ffd977', cx, 8, cz + 14.4, 0, 13);
-    } else if (kind === 'bank') {
-      const m = new THREE.MeshLambertMaterial({ color: 0xcfd4d2 });
-      this._building(scene, cx, cz, 30, 26, 12, m, roofMat);
-      this._sign(scene, 'BANCO VERDE', null, '#123324', '#7fe0a8', cx, 9.5, cz + 13.4, 0, 14);
-    } else if (kind === 'cafe') {
-      const m = new THREE.MeshLambertMaterial({ color: 0xe6c9a0 });
-      this._building(scene, cx, cz, 24, 20, 7, m, roofMat);
-      this._sign(scene, 'CAFE MARINA', null, '#40260f', '#ffb46b', cx, 5.6, cz + 10.4, 0, 12);
-    } else if (kind === 'safehouse') {
-      const m = new THREE.MeshLambertMaterial({ color: 0xd9b48c });
-      this._building(scene, cx, cz, 16, 13, 6, m, roofMat);
-      this._sign(scene, 'SAFEHOUSE', null, '#2c2118', '#ffd9a0', cx, 4.6, cz + 6.9, 0, 8);
-    } else if (kind === 'paynspray') {
-      this._paynsprayGarage(scene, cx, cz);
-    }
-  },
-
-  _paynsprayGarage: function (scene, cx, cz) {
-    const wallMat = new THREE.MeshLambertMaterial({ color: 0xb9c0c4 });
-    const geo = CVH.world._unitBox || (CVH.world._unitBox = new THREE.BoxGeometry(1, 1, 1));
-    const wall = (x, z, w, d, h) => {
-      const m = new THREE.Mesh(geo, wallMat);
-      m.scale.set(w, h, d);
-      m.position.set(x, h / 2, z);
-      m.castShadow = true;
-      scene.add(m);
-      this._addCollider(x, z, w, d);
-    };
-    // Open-front garage facing north (toward the street at roadZ(4)).
-    wall(cx - 8.5, cz + 2, 1.4, 16, 6.5);       // west wall
-    wall(cx + 8.5, cz + 2, 1.4, 16, 6.5);       // east wall
-    wall(cx, cz + 9.6, 18.4, 1.4, 6.5);         // back wall
-    const roof = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0x37414a }));
-    roof.scale.set(19, 0.6, 17.5);
-    roof.position.set(cx, 6.8, cz + 2);
-    scene.add(roof);
-    // Service pad the player drives onto.
-    const pad = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0x5f7d8c }));
-    pad.scale.set(15, 0.12, 15);
-    pad.position.set(cx, 0.06, cz + 1);
-    scene.add(pad);
-    this.paynspray = { minX: cx - 7.5, maxX: cx + 7.5, minZ: cz - 6.5, maxZ: cz + 8.5, cx: cx, cz: cz };
-    this._sign(scene, "PAY 'N SPRAY", 'REPAIRS · RESPRAYS', '#20303a', '#8fd8ff', cx, 5.6, cz - 6.4, Math.PI, 13);
-  },
-
-  _parkingLot: function (scene, cx, cz) {
-    const geo = CVH.world._unitBox || (CVH.world._unitBox = new THREE.BoxGeometry(1, 1, 1));
-    const slab = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0x565b60 }));
-    slab.scale.set(36, 0.14, 36);
-    slab.position.set(cx, 0.07, cz);
+    var slab = new THREE.Mesh(new THREE.PlaneGeometry(452, 424),
+      new THREE.MeshLambertMaterial({ color: 0xa9a49b }));
+    slab.rotation.x = -Math.PI / 2;
+    slab.position.set(-16, 0, 0);
     slab.receiveShadow = true;
     scene.add(slab);
-    // Painted bays.
-    const lineMat = new THREE.MeshBasicMaterial({ color: 0xd8d8d0 });
-    for (let k = -2; k <= 2; k++) {
-      const line = new THREE.Mesh(geo, lineMat);
-      line.scale.set(0.25, 0.02, 9);
-      line.position.set(cx + k * 6.4, 0.16, cz - 10);
-      scene.add(line);
-      const line2 = line.clone();
-      line2.position.z = cz + 10;
-      scene.add(line2);
-    }
-  },
 
-  _park: function (scene, cx, cz) {
-    const geo = CVH.world._unitBox || (CVH.world._unitBox = new THREE.BoxGeometry(1, 1, 1));
-    const grass = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0x69a355 }));
-    grass.scale.set(36, 0.14, 36);
-    grass.position.set(cx, 0.07, cz);
-    grass.receiveShadow = true;
-    scene.add(grass);
-    for (let k = 0; k < 4; k++) {
-      this._palm(scene, cx + CVH.rand(-14, 14), cz + CVH.rand(-14, 14));
-    }
-  },
+    // -- beach sand (east strip) and the sea
+    var sand = new THREE.Mesh(new THREE.PlaneGeometry(66, 424),
+      new THREE.MeshLambertMaterial({ color: 0xe6cf9f }));
+    sand.rotation.x = -Math.PI / 2;
+    sand.position.set(222, 0.02, 0);
+    sand.receiveShadow = true;
+    scene.add(sand);
 
-  _palm: function (scene, x, z) {
-    const trunkMat = CVH.world._trunkMat || (CVH.world._trunkMat = new THREE.MeshLambertMaterial({ color: 0x8a6f4d }));
-    const leafMat = CVH.world._leafMat || (CVH.world._leafMat = new THREE.MeshLambertMaterial({ color: 0x3f9142 }));
-    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.24, 3.6, 6), trunkMat);
-    trunk.position.set(x, 1.8, z);
-    trunk.rotation.z = CVH.rand(-0.1, 0.1);
-    trunk.castShadow = true;
-    scene.add(trunk);
-    const fronds = new THREE.Mesh(new THREE.ConeGeometry(2.4, 1.0, 7), leafMat);
-    fronds.scale.y = 0.4;
-    fronds.position.set(x + trunk.rotation.z * -3.4, 3.8, z);
-    scene.add(fronds);
-    const fronds2 = new THREE.Mesh(new THREE.ConeGeometry(1.8, 0.8, 6), leafMat);
-    fronds2.scale.y = 0.35;
-    fronds2.rotation.y = 0.7;
-    fronds2.position.copy(fronds.position);
-    fronds2.position.y += 0.25;
-    scene.add(fronds2);
-  },
-
-  _buildVegetation: function (scene) {
-    // A palm row along the beach and a few at the marina.
-    for (let z = -150; z <= 150; z += 25) this._palm(scene, 214 + CVH.rand(-2, 2), z + CVH.rand(-4, 4));
-    this._palm(scene, 222, -40); this._palm(scene, 222, -12); this._palm(scene, 220, 20);
-    this._palm(scene, 138, -34); this._palm(scene, 174, -34);
-  },
-
-  _buildLamps: function (scene) {
-    const poleMat = new THREE.MeshLambertMaterial({ color: 0x3c4147 });
-    this.lampHeadMat = new THREE.MeshLambertMaterial({ color: 0x666a60, emissive: 0xffd9a0, emissiveIntensity: 0 });
-    const poleGeo = new THREE.CylinderGeometry(0.09, 0.12, 5, 5);
-    const headGeo = new THREE.SphereGeometry(0.22, 8, 6);
-    for (let i = 0; i < 8; i++) {
-      for (let j = 0; j < 6; j++) {
-        const x = this.roadX(i) + 7.6, z = this.roadZ(j) + 7.6;
-        const pole = new THREE.Mesh(poleGeo, poleMat);
-        pole.position.set(x, 2.5, z);
-        scene.add(pole);
-        const head = new THREE.Mesh(headGeo, this.lampHeadMat);
-        head.position.set(x, 5.05, z);
-        scene.add(head);
+    waterTex = canvasTex(128, 128, function (g, w, h) {
+      g.fillStyle = '#2f7ea6'; g.fillRect(0, 0, w, h);
+      g.strokeStyle = 'rgba(255,255,255,0.20)'; g.lineWidth = 3;
+      for (var i = 0; i < 6; i++) {
+        g.beginPath();
+        g.moveTo(0, i * 22 + 6);
+        g.bezierCurveTo(w * 0.3, i * 22, w * 0.6, i * 22 + 12, w, i * 22 + 4);
+        g.stroke();
       }
-    }
-  },
+    }, 10, 10);
+    waterMat = new THREE.MeshLambertMaterial({ map: waterTex, transparent: true, opacity: 0.94 });
+    var water = new THREE.Mesh(new THREE.PlaneGeometry(190, 460), waterMat);
+    water.rotation.x = -Math.PI / 2;
+    water.position.set(WATER_X + 95, 0.22, 0);
+    scene.add(water);
+    world._water = water;
 
-  _buildMarina: function (scene) {
-    const geo = CVH.world._unitBox || (CVH.world._unitBox = new THREE.BoxGeometry(1, 1, 1));
-    const woodMat = new THREE.MeshLambertMaterial({ color: 0x8a6a44 });
-    const deck = new THREE.Mesh(geo, woodMat);
-    deck.scale.set(46, 0.5, 6);
-    deck.position.set(249, 0.55, this.pier.z);
-    deck.castShadow = true;
-    scene.add(deck);
-    const postGeo = new THREE.CylinderGeometry(0.16, 0.16, 1.6, 6);
-    for (let x = 230; x <= 268; x += 7.6) {
-      for (const dz of [-2.6, 2.6]) {
-        const post = new THREE.Mesh(postGeo, woodMat);
-        post.position.set(x, 0, this.pier.z + dz);
-        scene.add(post);
-      }
+    // -- roads (asphalt with edge lines + dashed centre line in texture)
+    var roadTexV = canvasTex(128, 128, function (g, w, h) {
+      g.fillStyle = '#3c3f45'; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#e8e4da'; g.fillRect(4, 0, 4, h); g.fillRect(w - 8, 0, 4, h);
+      g.fillStyle = '#f5c542'; g.fillRect(w / 2 - 2, 6, 4, 44);
+    }, 1, 30);
+    var roadMatV = new THREE.MeshLambertMaterial({ map: roadTexV });
+    var roadTexH = canvasTex(128, 128, function (g, w, h) {
+      g.fillStyle = '#3c3f45'; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#e8e4da'; g.fillRect(0, 4, w, 4); g.fillRect(0, h - 8, w, 4);
+      g.fillStyle = '#f5c542'; g.fillRect(6, h / 2 - 2, 44, 4);
+    }, 30, 1);
+    var roadMatH = new THREE.MeshLambertMaterial({ map: roadTexH });
+    var walkMat = new THREE.MeshLambertMaterial({ color: 0xcac4b8 });
+    var i, j;
+    for (i = 0; i < ROAD_XS.length; i++) {
+      var rp = new THREE.Mesh(new THREE.PlaneGeometry(ROAD_W, 424), roadMatV);
+      rp.rotation.x = -Math.PI / 2; rp.position.set(ROAD_XS[i], 0.03, 0);
+      rp.receiveShadow = true; scene.add(rp);
+      box(3, 0.09, 424, walkMat, ROAD_XS[i] - 9, 0.045, 0, scene, false).receiveShadow = true;
+      box(3, 0.09, 424, walkMat, ROAD_XS[i] + 9, 0.045, 0, scene, false).receiveShadow = true;
     }
-    // Moored boats, bobbing in updateVisuals.
-    const hullCols = [0xd8574a, 0x4a7fd8, 0xf0ead8, 0x57b06a, 0xe8a13a];
-    for (let k = 0; k < 5; k++) {
-      const boat = new THREE.Group();
-      const hull = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: hullCols[k] }));
-      hull.scale.set(4.6, 1.0, 1.9);
-      hull.position.y = 0.35;
-      boat.add(hull);
-      const bow = new THREE.Mesh(geo, hull.material);
-      bow.scale.set(1.4, 0.9, 1.3);
-      bow.position.set(2.8, 0.35, 0);
-      bow.rotation.y = Math.PI / 4;
-      boat.add(bow);
-      const cabin = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0xf2f0e8 }));
-      cabin.scale.set(1.7, 0.9, 1.3);
-      cabin.position.set(-0.5, 1.2, 0);
-      boat.add(cabin);
-      if (k % 2 === 0) {
-        const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 4.6, 5),
-          new THREE.MeshLambertMaterial({ color: 0xcccccc }));
-        mast.position.set(0.7, 3.1, 0);
-        boat.add(mast);
-      }
-      boat.position.set(238 + k * 7.5, 0.15, this.pier.z + (k % 2 === 0 ? -6.5 : 6.5));
-      boat.rotation.y = Math.PI / 2 + CVH.rand(-0.08, 0.08);
+    for (j = 0; j < ROAD_ZS.length; j++) {
+      var rp2 = new THREE.Mesh(new THREE.PlaneGeometry(482, ROAD_W), roadMatH);
+      rp2.rotation.x = -Math.PI / 2; rp2.position.set(-8, 0.03, ROAD_ZS[j]);
+      rp2.receiveShadow = true; scene.add(rp2);
+      box(482, 0.09, 3, walkMat, -8, 0.045, ROAD_ZS[j] - 9, scene, false).receiveShadow = true;
+      box(482, 0.09, 3, walkMat, -8, 0.045, ROAD_ZS[j] + 9, scene, false).receiveShadow = true;
+    }
+
+    // -- pier deck + boats
+    var deckMat = new THREE.MeshLambertMaterial({ color: 0x8a6f4d });
+    box(PIER.x1 - PIER.x0, 0.3, PIER.z1 - PIER.z0, deckMat,
+      (PIER.x0 + PIER.x1) / 2, 0.02, (PIER.z0 + PIER.z1) / 2, scene, false).receiveShadow = true;
+    var hullCols = [0xd95f43, 0x3f7fbf, 0xe8e3d8, 0x53a06a];
+    for (i = 0; i < 4; i++) {
+      var boat = new THREE.Group();
+      var hull = box(7, 1.4, 2.6, new THREE.MeshLambertMaterial({ color: hullCols[i] }), 0, 0.4, 0, boat);
+      hull.castShadow = false;
+      box(2.6, 1.1, 1.8, new THREE.MeshLambertMaterial({ color: 0xf2efe8 }), -0.4, 1.4, 0, boat, false);
+      var mast = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 5, 5),
+        new THREE.MeshLambertMaterial({ color: 0x777777 }));
+      mast.position.set(1.2, 3.4, 0); boat.add(mast);
+      boat.position.set(252 + (i % 2) * 14, 0.25, i < 2 ? -46 - i * 6 : 8 + i * 7);
+      boat.rotation.y = (i % 2 ? -0.2 : 0.25);
       scene.add(boat);
-      this.boats.push({ group: boat, phase: CVH.rand(0, CVH.TAU) });
+      boats.push({ g: boat, ph: i * 1.7 });
     }
-  },
 
-  _buildPickups: function (scene) {
-    // 14 cash packages — every spot is on a sidewalk, lot, park, pier or the
-    // beach, i.e. audited clear of every building footprint above.
-    const spots = [
-      [-122, -18], [-86, -86], [137, -52], [0, 19], [-52, 52], [104, -52],
-      [-52, -52], [104, 52], [0, -104], [266, -26], [228, -120], [228, 120],
-      [-142, 90], [71, 104]
-    ];
-    const boxGeo = new THREE.BoxGeometry(0.55, 0.4, 0.55);
-    const boxMat = new THREE.MeshLambertMaterial({ color: 0x2fae4e, emissive: 0x1d7a34, emissiveIntensity: 0.7 });
-    spots.forEach(function (s, idx) {
-      const m = new THREE.Mesh(boxGeo, boxMat);
-      m.position.set(s[0], 0.8, s[1]);
-      scene.add(m);
-      CVH.world.packages.push({ id: idx, x: s[0], z: s[1], mesh: m, taken: false });
-    });
-    // Weapon pickups: pistol by the police station, SMG at the marina.
-    const mkPickup = function (x, z, kind, col) {
-      const grp = new THREE.Group();
-      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.85, 0.07, 8, 20),
-        new THREE.MeshBasicMaterial({ color: col }));
-      ring.rotation.x = Math.PI / 2;
-      ring.position.y = 0.25;
-      grp.add(ring);
-      const gun = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.22, 0.85),
-        new THREE.MeshLambertMaterial({ color: 0x22262b }));
-      gun.position.y = 0.85;
-      gun.rotation.y = 0.6;
-      grp.add(gun);
-      grp.position.set(x, 0, z);
-      scene.add(grp);
-      CVH.world.pickups.push({ x: x, z: z, kind: kind, mesh: grp, taken: false });
-    };
-    mkPickup(-104, -19, 'pistol', 0xffc46b);
-    mkPickup(240, -26, 'smg', 0xff7a5c);
+    buildBlocks(rng);
+    buildLandmarks();
+    buildNature(rng);
+    buildStands();
+    buildCollectables();
 
-    // Food stands: a kiosk with an awning; main.js handles the heal-for-cash.
-    const standSpots = [[-60, 44], [96, -60], [216, -96], [222, -36], [-44, -44]];
-    const baseMat = new THREE.MeshLambertMaterial({ color: 0xe8e2d2 });
-    const awnMat = new THREE.MeshLambertMaterial({ color: 0xd8574a });
-    const geo = CVH.world._unitBox || (CVH.world._unitBox = new THREE.BoxGeometry(1, 1, 1));
-    standSpots.forEach(function (s) {
-      const grp = new THREE.Group();
-      const base = new THREE.Mesh(geo, baseMat);
-      base.scale.set(3.2, 2.2, 2.2);
-      base.position.y = 1.1;
-      base.castShadow = true;
-      grp.add(base);
-      const awn = new THREE.Mesh(geo, awnMat);
-      awn.scale.set(3.8, 0.16, 3.0);
-      awn.position.set(0, 2.55, 0.3);
-      awn.rotation.x = 0.18;
-      grp.add(awn);
-      grp.position.set(s[0], 0, s[1]);
-      scene.add(grp);
-      CVH.world._addCollider(s[0], s[1], 3.2, 2.2);
-      CVH.world.stands.push({ x: s[0], z: s[1], price: 15, heal: 45 });
-    });
-  },
+    // -- lights: one sun with a tight shadow box + hemisphere fill
+    var hemi = new THREE.HemisphereLight(0xbfdcff, 0x8a7a5f, 0.75);
+    scene.add(hemi);
+    world.hemi = hemi;
+    var sun = new THREE.DirectionalLight(0xfff2d8, 1.05);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    sun.shadow.camera.left = -95; sun.shadow.camera.right = 95;
+    sun.shadow.camera.top = 95; sun.shadow.camera.bottom = -95;
+    sun.shadow.camera.far = 420;
+    sun.shadow.bias = -0.0008;
+    scene.add(sun);
+    scene.add(sun.target);
+    world.sun = sun;
+  };
 
-  // ---- time of day ---------------------------------------------------------------
-  applyTimeOfDay: function (scene) {
-    const p = this.phase;
-    const theta = p * Math.PI; // sun arc: rises at p=0, sets at p=1
-    const elev = Math.sin(theta);
-    // Dusk gathers as the sun sinks in the last stretch of the arc: golden
-    // hour around phase 0.8, full dusk by 0.9, sunset at the wrap.
-    const rawDusk = CVH.clamp((0.72 - elev) / 0.5, 0, 1);
-    this.dusk = CVH.smooth(rawDusk) * (p > 0.45 ? 1 : 0.25);
-    const d = this.dusk;
-    const sunCol = new THREE.Color(0xfff2d8).lerp(new THREE.Color(0xff9a4d), d);
-    this.sun.color.copy(sunCol);
-    this.sun.intensity = CVH.lerp(1.15, 0.55, d);
-    this.hemi.intensity = CVH.lerp(0.75, 0.34, d);
-    const sky = new THREE.Color(0xbfd9e8).lerp(new THREE.Color(0xdd8a52), d);
-    if (scene) {
-      scene.fog.color.copy(sky);
-      if (scene.background) scene.background.copy(sky); else scene.background = sky.clone();
-    }
-    for (let i = 0; i < this.facadeMats.length; i++) this.facadeMats[i].emissiveIntensity = d * 0.95;
-    if (this.lampHeadMat) this.lampHeadMat.emissiveIntensity = d * 1.6;
-    if (this.water) this.water.material.color.setHex(0x2b6f96).lerp(new THREE.Color(0x274b6e), d);
-  },
+  // ------------------------------------------------------------ blocks
+  // Landmark plots (block centres) that random buildings must skip.
+  var PLOTS = {
+    '-90,-120': 'police', '30,-120': 'hospital', '90,120': 'pns',
+    '-150,120': 'safehouse', '150,-60': 'hotel', '-30,60': 'bank'
+  };
+  function blockKey(cx, cz) { return cx + ',' + cz; }
 
-  sunFollow: function (focus) {
-    const theta = this.phase * Math.PI;
-    this.sun.position.set(
-      focus.x + Math.cos(theta) * 130,
-      26 + Math.sin(theta) * 120,
-      focus.z + 46
-    );
-    this.sun.target.position.set(focus.x, 0, focus.z);
-  },
-
-  update: function (dt, scene) {
-    this.phase = (this.phase + dt / 420) % 1; // a full day in about 7 minutes
-    this.applyTimeOfDay(scene);
-    this.updateVisuals(dt);
-  },
-
-  // Animation that is safe to run while the game is frozen for a screenshot.
-  updateVisuals: function (dt) {
-    const t = performance.now() / 1000;
-    if (this.water) this.water.position.y = 0.12 + Math.sin(t * 0.9) * 0.05;
-    if (this.foam) this.foam.material.opacity = 0.35 + 0.25 * (0.5 + 0.5 * Math.sin(t * 1.4));
-    for (let i = 0; i < this.boats.length; i++) {
-      const b = this.boats[i];
-      b.group.position.y = 0.15 + Math.sin(t * 0.8 + b.phase) * 0.09;
-      b.group.rotation.z = Math.sin(t * 0.6 + b.phase) * 0.03;
-    }
-    for (let i = 0; i < this.packages.length; i++) {
-      const pk = this.packages[i];
-      if (pk.taken) continue;
-      pk.mesh.rotation.y += dt * 2.2;
-      pk.mesh.position.y = 0.8 + Math.sin(t * 2.4 + pk.id) * 0.14;
-    }
-    for (let i = 0; i < this.pickups.length; i++) {
-      const pu = this.pickups[i];
-      if (pu.taken) continue;
-      pu.mesh.rotation.y += dt * 1.4;
-    }
-  },
-
-  // Push a circle (x,z,r) out of every building AABB. Mutates and returns pos.
-  collide: function (pos, r) {
-    const cs = this.colliders;
-    for (let i = 0; i < cs.length; i++) {
-      const c = cs[i];
-      const nx = CVH.clamp(pos.x, c.minX, c.maxX);
-      const nz = CVH.clamp(pos.z, c.minZ, c.maxZ);
-      let dx = pos.x - nx, dz = pos.z - nz;
-      const d2 = dx * dx + dz * dz;
-      if (d2 > r * r) continue;
-      if (d2 > 1e-8) {
-        const d = Math.sqrt(d2);
-        pos.x = nx + (dx / d) * r;
-        pos.z = nz + (dz / d) * r;
-      } else {
-        // Centre is inside the box: leave by the nearest face.
-        const left = pos.x - c.minX, right = c.maxX - pos.x;
-        const near = pos.z - c.minZ, far = c.maxZ - pos.z;
-        const m = Math.min(left, right, near, far);
-        if (m === left) pos.x = c.minX - r;
-        else if (m === right) pos.x = c.maxX + r;
-        else if (m === near) pos.z = c.minZ - r;
-        else pos.z = c.maxZ + r;
+  function buildBlocks(rng) {
+    var cols = [], rows = [], i, j;
+    for (i = 0; i < ROAD_XS.length - 1; i++) cols.push((ROAD_XS[i] + ROAD_XS[i + 1]) / 2);
+    for (j = 0; j < ROAD_ZS.length - 1; j++) rows.push((ROAD_ZS[j] + ROAD_ZS[j + 1]) / 2);
+    for (i = 0; i < cols.length; i++) {
+      for (j = 0; j < rows.length; j++) {
+        var cx = cols[i], cz = rows[j];
+        if (PLOTS[blockKey(cx, cz)]) continue;
+        var central = Math.abs(cx) <= 60 && Math.abs(cz) <= 60;
+        var n = 1 + Math.floor(rng() * (central ? 3 : 4));
+        for (var k = 0; k < n; k++) {
+          var w = CVH.randRange(rng, 12, n === 1 ? 34 : 20);
+          var d = CVH.randRange(rng, 12, n === 1 ? 34 : 20);
+          var bx = cx + (n === 1 ? 0 : CVH.randRange(rng, -13, 13));
+          var bz = cz + (n === 1 ? 0 : CVH.randRange(rng, -13, 13));
+          bx = CVH.clamp(bx, cx - 22 + w / 2, cx + 22 - w / 2);
+          bz = CVH.clamp(bz, cz - 22 + d / 2, cz + 22 - d / 2);
+          // never overlap an earlier collider in the same block
+          var clash = false;
+          for (var c = 0; c < colliders.length; c++) {
+            var cc = colliders[c];
+            if (bx + w / 2 > cc.x0 - 1 && bx - w / 2 < cc.x1 + 1 && bz + d / 2 > cc.z0 - 1 && bz - d / 2 < cc.z1 + 1) { clash = true; break; }
+          }
+          if (clash) continue;
+          var h = central ? CVH.randRange(rng, 16, 46) : CVH.randRange(rng, 8, 30);
+          var mat = facadeMats[Math.floor(rng() * facadeMats.length)];
+          box(w, h, d, mat, bx, h / 2, bz);
+          // rooftop cap so tops are not see-through bright
+          box(w + 0.2, 0.3, d + 0.2, new THREE.MeshLambertMaterial({ color: 0x6b6259 }), bx, h + 0.15, bz, null, false);
+          addCollider(bx, bz, w, d);
+        }
       }
     }
-    // The marina pier reaches past the beach bound; let the player walk it
-    // (its end holds a cash package that must stay reachable).
-    const maxX = (pos.z > -30 && pos.z < -22) ? 270 : this.bounds.maxX;
-    pos.x = CVH.clamp(pos.x, this.bounds.minX, maxX);
-    pos.z = CVH.clamp(pos.z, this.bounds.minZ, this.bounds.maxZ);
-    return pos;
   }
-};
+
+  function landmarkBlock(cx, cz, w, d, h, mat, roofColor) {
+    box(w, h, d, mat, cx, h / 2, cz);
+    box(w + 0.2, 0.3, d + 0.2, new THREE.MeshLambertMaterial({ color: roofColor || 0x6b6259 }), cx, h + 0.15, cz, null, false);
+    addCollider(cx, cz, w, d);
+  }
+
+  function buildLandmarks() {
+    var white = new THREE.MeshLambertMaterial({ color: 0xe9e6df });
+    var blue = new THREE.MeshLambertMaterial({ color: 0x4a6b8a });
+    var red = new THREE.MeshLambertMaterial({ color: 0xb84a3f });
+
+    // Police HQ — porch/spawn point sits south of the block, on the apron.
+    landmarkBlock(-90, -120, 32, 24, 15, blue);
+    signMesh('POLICE', '#20344d', '#cfe6ff', 20, 5, -90, 11, -107.8, 0, 'COSTA VERDE HQ');
+    // Hospital
+    landmarkBlock(30, -120, 32, 24, 17, white);
+    box(4, 10, 1, red, 30, 13, -107.6);
+    box(10, 4, 1, red, 30, 13, -107.6);
+    signMesh('HOSPITAL', '#e9e6df', '#b8302a', 20, 5, 30, 6.5, -107.8, 0);
+    // Pay 'n Spray — garage with a dark open mouth facing the z=90 street.
+    landmarkBlock(90, 120, 30, 22, 9, new THREE.MeshLambertMaterial({ color: 0x707880 }));
+    box(16, 6.5, 0.6, new THREE.MeshLambertMaterial({ color: 0x14181c }), 90, 3.25, 108.7);
+    signMesh("PAY 'N SPRAY", '#173d2a', '#7dffb0', 22, 5.5, 90, 8.2, 108.6, 0, 'REPAIRS · RESPRAYS');
+    // Safehouse — Marisol's porch.
+    landmarkBlock(-150, 120, 26, 20, 10, new THREE.MeshLambertMaterial({ color: 0xd8b98a }));
+    box(28, 0.5, 6, new THREE.MeshLambertMaterial({ color: 0x8a6f4d }), -150, 0.25, 107);
+    signMesh('SAFEHOUSE', '#4d3420', '#ffd98a', 16, 4, -150, 7.5, 109.8, 0);
+    // Hotel Sol — the tall tower on the east side.
+    landmarkBlock(150, -60, 30, 26, 44, facadeMats[2]);
+    hotelSignMat = signMesh('HOTEL SOL', '#3d2030', '#ffb0d8', 24, 6, 150, 38, -46.8, 0, '★ ★ ★ ★');
+    // Banco Verde
+    landmarkBlock(-30, 60, 30, 24, 13, new THREE.MeshLambertMaterial({ color: 0x9db8a4 }));
+    signMesh('BANCO VERDE', '#1e3d2a', '#b0ffd0', 22, 5, -30, 9, 47.8, 0);
+    // Cafe Marina — small beach cafe on the sand edge.
+    landmarkBlock(200, -60, 11, 9, 4.5, new THREE.MeshLambertMaterial({ color: 0xf0e2c8 }));
+    signMesh('CAFE MARINA', '#5d3a1a', '#ffe1a8', 12, 3, 200, 3.6, -55.3, 0);
+  }
+
+  function buildNature(rng) {
+    var trunkMat = new THREE.MeshLambertMaterial({ color: 0x8a6a48 });
+    var frondMat = new THREE.MeshLambertMaterial({ color: 0x3f8f4f });
+    var lampPoleMat = new THREE.MeshLambertMaterial({ color: 0x3a3f45 });
+    lampMat = new THREE.MeshLambertMaterial({ color: 0xfff2c0, emissive: new THREE.Color(0xffdf9a), emissiveIntensity: 0.15 });
+
+    function palm(x, z) {
+      var g = new THREE.Group();
+      var trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.24, 3.6, 6), trunkMat);
+      trunk.position.y = 1.8;
+      trunk.rotation.z = CVH.randRange(rng, -0.09, 0.09);
+      trunk.castShadow = true;
+      g.add(trunk);
+      var crown = new THREE.Mesh(new THREE.ConeGeometry(2.5, 1.15, 7), frondMat);
+      crown.rotation.x = Math.PI;
+      crown.position.y = 3.9;
+      crown.castShadow = true;
+      g.add(crown);
+      g.position.set(x, 0, z);
+      CVH.scene.add(g);
+    }
+    var z;
+    for (z = -196; z <= 196; z += 26) palm(214 + (rng() * 6 - 3), z);
+    palm(206, -44); palm(206, -76); palm(196, 22); palm(206, 128);
+    palm(-196, 60); palm(-196, -40); palm(40, -196); palm(-80, 196);
+
+    // Street lamps at alternating intersections.
+    var lampGeo = new THREE.CylinderGeometry(0.09, 0.12, 5.6, 5);
+    var headGeo = new THREE.SphereGeometry(0.32, 8, 6);
+    for (var i = 0; i < ROAD_XS.length; i++) {
+      for (var j = 0; j < ROAD_ZS.length; j++) {
+        if ((i + j) % 2 !== 0) continue;
+        var pole = new THREE.Mesh(lampGeo, lampPoleMat);
+        pole.position.set(ROAD_XS[i] + 10.6, 2.8, ROAD_ZS[j] + 10.6);
+        CVH.scene.add(pole);
+        var head = new THREE.Mesh(headGeo, lampMat);
+        head.position.set(ROAD_XS[i] + 10.6, 5.7, ROAD_ZS[j] + 10.6);
+        CVH.scene.add(head);
+      }
+    }
+  }
+
+  var STAND_DEFS = [
+    { name: 'TACO SOL', x: 11, z: 44, fx: 7.6, fz: 44, col: '#c9552e' },
+    { name: 'AREPA MIA', x: -70, z: -44, fx: -66.6, fz: -44, col: '#2e7fc9' },
+    { name: 'FRUTA FRESCA', x: 130, z: 16, fx: 126.6, fz: 16, col: '#53a06a' },
+    { name: 'EMPANADA SUR', x: -130, z: 136, fx: -126.6, fz: 136, col: '#c92e7f' },
+    { name: 'CAFE PLAYA', x: 197, z: 96, fx: 192.5, fz: 96, col: '#7a4dc9' }
+  ];
+  function buildStands() {
+    for (var i = 0; i < STAND_DEFS.length; i++) {
+      var s = STAND_DEFS[i];
+      var g = new THREE.Group();
+      box(3.4, 2.3, 2.6, new THREE.MeshLambertMaterial({ color: 0xf2ead8 }), 0, 1.15, 0, g);
+      var awnTex = canvasTex(64, 64, function (gg, w, h) {
+        gg.fillStyle = s.col; gg.fillRect(0, 0, w, h);
+        gg.fillStyle = '#ffffff';
+        for (var x = 0; x < w; x += 16) gg.fillRect(x, 0, 8, h);
+      });
+      var awn = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.18, 3.4),
+        new THREE.MeshLambertMaterial({ map: awnTex }));
+      awn.position.set(0, 2.6, 0.2); awn.rotation.x = 0.18; awn.castShadow = true;
+      g.add(awn);
+      g.position.set(s.x, 0, s.z);
+      CVH.scene.add(g);
+      signMesh(s.name, '#22201c', '#ffe9b0', 4.4, 1.1, s.x, 3.3, s.z - 1.2, 0);
+      addCollider(s.x, s.z, 3.4, 2.6);
+      world.stands.push({ x: s.x, z: s.z, fx: s.fx, fz: s.fz, name: s.name });
+    }
+  }
+
+  var PACKAGE_SPOTS = [
+    [9.8, -60], [-128, 20.2], [222, -120], [270, -12], [-150, -99.8], [66, -140],
+    [190, 150], [-196, -20], [120, 99.8], [-30, -161], [232, 120], [60, 140],
+    [-88, 30], [205, -178]
+  ];
+  function buildCollectables() {
+    var pkgMat = new THREE.MeshLambertMaterial({ color: 0x35d465, emissive: new THREE.Color(0x1d7a3a), emissiveIntensity: 0.7 });
+    for (var i = 0; i < PACKAGE_SPOTS.length; i++) {
+      var m = box(0.85, 0.85, 0.85, pkgMat, PACKAGE_SPOTS[i][0], 0.8, PACKAGE_SPOTS[i][1], null, false);
+      m.rotation.y = 0.6;
+      world.packages.push({ x: PACKAGE_SPOTS[i][0], z: PACKAGE_SPOTS[i][1], mesh: m, taken: false, ph: i * 0.9 });
+    }
+    function pickup(kind, x, z, color) {
+      var g = new THREE.Group();
+      var body = box(0.9, 0.28, 0.36, new THREE.MeshLambertMaterial({ color: color }), 0, 0, 0, g, false);
+      body.rotation.z = 0.2;
+      box(0.3, 0.34, 0.3, new THREE.MeshLambertMaterial({ color: 0x222222 }), 0.25, -0.12, 0, g, false);
+      g.position.set(x, 1.0, z);
+      CVH.scene.add(g);
+      world.pickups.push({ kind: kind, x: x, z: z, mesh: g, taken: false });
+    }
+    pickup('pistol', -186, 128, 0x3a3f45);
+    pickup('smg', 266, -26, 0x5a4632);
+  }
+
+  // ------------------------------------------------------------ queries
+  function inPier(x, z) { return x >= PIER.x0 && x <= PIER.x1 && z >= PIER.z0 && z <= PIER.z1; }
+
+  world.isLand = function (x, z) { return x < WATER_X || inPier(x, z); };
+  world.inBounds = function (x, z) {
+    if (z < MINZ || z > MAXZ) return false;
+    if (inPier(x, z)) return true;
+    return x >= MINX && x <= MAXX;
+  };
+  world.clearOfBuildings = function (x, z, r) {
+    r = r || 0;
+    for (var i = 0; i < colliders.length; i++) {
+      var c = colliders[i];
+      if (x > c.x0 - r && x < c.x1 + r && z > c.z0 - r && z < c.z1 + r) return false;
+    }
+    return true;
+  };
+  // The reachability audit used by missions and by the playtest (fix 5).
+  world.auditPoint = function (x, z, r) {
+    var res = {
+      inBounds: world.inBounds(x, z),
+      onLand: world.isLand(x, z),
+      clear: world.clearOfBuildings(x, z, r === undefined ? 0.6 : r)
+    };
+    res.ok = res.inBounds && res.onLand && res.clear;
+    return res;
+  };
+
+  // Push a point out of buildings and back inside the world. Returns true
+  // when a building was hit (vehicles use it for crash detection).
+  world.collide = function (pos, r) {
+    var hit = false;
+    for (var i = 0; i < colliders.length; i++) {
+      var c = colliders[i];
+      if (pos.x > c.x0 - r && pos.x < c.x1 + r && pos.z > c.z0 - r && pos.z < c.z1 + r) {
+        var dxl = pos.x - (c.x0 - r), dxr = (c.x1 + r) - pos.x;
+        var dzl = pos.z - (c.z0 - r), dzr = (c.z1 + r) - pos.z;
+        var m = Math.min(dxl, dxr, dzl, dzr);
+        if (m === dxl) pos.x = c.x0 - r;
+        else if (m === dxr) pos.x = c.x1 + r;
+        else if (m === dzl) pos.z = c.z0 - r;
+        else pos.z = c.z1 + r;
+        hit = true;
+      }
+    }
+    // world edge / waterline
+    var maxX = inPier(pos.x, pos.z) ? PIER.x1 - 0.4 : MAXX;
+    if (pos.x > maxX) { pos.x = maxX; hit = true; }
+    if (pos.x < MINX) { pos.x = MINX; hit = true; }
+    if (pos.z < MINZ) { pos.z = MINZ; hit = true; }
+    if (pos.z > MAXZ) { pos.z = MAXZ; hit = true; }
+    if (pos.x > WATER_X - r && !inPier(pos.x, pos.z)) { pos.x = WATER_X - r; hit = true; }
+    return hit;
+  };
+
+  world.nearestRoadPoint = function (x, z, out) {
+    var bx = ROAD_XS[0], bz = ROAD_ZS[0], bd = Infinity, i, d;
+    for (i = 0; i < ROAD_XS.length; i++) { d = Math.abs(x - ROAD_XS[i]); if (d < bd) { bd = d; bx = ROAD_XS[i]; } }
+    var bdz = Infinity;
+    for (i = 0; i < ROAD_ZS.length; i++) { d = Math.abs(z - ROAD_ZS[i]); if (d < bdz) { bdz = d; bz = ROAD_ZS[i]; } }
+    if (bd <= bdz) { out.x = bx; out.z = CVH.clamp(z, MINZ + 4, MAXZ - 4); }
+    else { out.x = CVH.clamp(x, MINX + 4, MAXX - 4); out.z = bz; }
+    return out;
+  };
+
+  // --------------------------------------------------------- day cycle
+  var sunDir = null;
+  world.update = function (dt, focus) {
+    CVH.dayT = (CVH.dayT + dt / 420) % 1;
+    var p = CVH.dayT;
+    var ang = p * Math.PI;                       // sun arc east -> west
+    var elev = Math.sin(ang);
+    var daylight = CVH.clamp(elev * 1.5 + 0.12, 0.16, 1);
+    var dusk = CVH.clamp(1 - Math.abs(elev) * 1.9, 0, 1) * (p > 0.03 && p < 0.97 ? 1 : 0.35);
+    CVH.dusk = dusk;
+
+    if (!sunDir) sunDir = new THREE.Vector3();
+    sunDir.set(Math.cos(ang), Math.max(elev, 0.06) * 0.9 + 0.12, 0.38).normalize();
+    var sun = world.sun;
+    sun.position.set(focus.x + sunDir.x * 170, sunDir.y * 170, focus.z + sunDir.z * 170);
+    sun.target.position.set(focus.x, 0, focus.z);
+    sun.intensity = 0.35 + daylight * 0.85;
+    sun.color.setHSL(0.11 - dusk * 0.045, 0.5 * dusk + 0.12, 0.72 - dusk * 0.08);
+    world.hemi.intensity = 0.28 + daylight * 0.5;
+
+    if (!CVH._skyColor) CVH._skyColor = new THREE.Color();
+    var sky = CVH._skyColor;
+    sky.setHSL(0.58 - dusk * 0.42, 0.62 - dusk * 0.12, 0.72 - daylight * 0.06 - dusk * 0.14);
+    if (CVH.renderer) CVH.renderer.setClearColor(sky);
+    if (CVH.scene && CVH.scene.fog) {
+      CVH.scene.fog.color.copy(sky);
+      CVH.scene.fog.near = 190 - dusk * 50;
+      CVH.scene.fog.far = 460 - dusk * 90;
+    }
+    var i;
+    for (i = 0; i < facadeMats.length; i++) facadeMats[i].emissiveIntensity = dusk * 0.95;
+    if (lampMat) lampMat.emissiveIntensity = 0.15 + dusk * 1.6;
+    if (hotelSignMat) hotelSignMat.color.setHSL(0.9, 0.5, 0.75 + Math.sin(CVH.time * 2.2) * 0.1);
+
+    // water shimmer + boat bobbing
+    if (waterTex) { waterTex.offset.x = (CVH.time * 0.008) % 1; waterTex.offset.y = Math.sin(CVH.time * 0.3) * 0.01; }
+    if (world._water) world._water.position.y = 0.22 + Math.sin(CVH.time * 0.7) * 0.05;
+    for (i = 0; i < boats.length; i++) {
+      boats[i].g.position.y = 0.25 + Math.sin(CVH.time * 0.8 + boats[i].ph) * 0.09;
+      boats[i].g.rotation.z = Math.sin(CVH.time * 0.6 + boats[i].ph) * 0.02;
+    }
+    // packages gently spin/bob so they read as pickups
+    var pk = world.packages;
+    for (i = 0; i < pk.length; i++) {
+      if (pk[i].taken) continue;
+      pk[i].mesh.rotation.y += dt * 1.6;
+      pk[i].mesh.position.y = 0.8 + Math.sin(CVH.time * 2 + pk[i].ph) * 0.14;
+    }
+    for (i = 0; i < world.pickups.length; i++) {
+      if (world.pickups[i].taken) continue;
+      world.pickups[i].mesh.rotation.y += dt * 1.2;
+    }
+  };
+
+  CVH._skyColor = null; // set by main after scene creation (needs THREE.Color)
+})();

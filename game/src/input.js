@@ -1,91 +1,93 @@
-'use strict';
-// Costa Verde Heat 3D — keyboard + mouse input, pointer lock with drag-orbit
-// fallback. Exposes held keys (down), one-frame key presses (hit), mouse
-// deltas for the camera, and an onLockLost hook: browsers swallow the Esc
-// keydown when pointer lock drops, so the game pauses off this callback.
+// input.js — keyboard + mouse state, drag orbit and pointer lock.
+// Owns CVH.input: a `keys` set for held keys, edge-triggered `pressed`
+// flags consumed once per frame, mouse orbit deltas for the camera, and
+// the pointer-lock-loss callback used by QA item 3 (auto-pause).
+(function () {
+  'use strict';
 
-CVH.input = {
-  keys: {},
-  pressed: {},
-  mouseDX: 0,
-  mouseDY: 0,
-  mouseHeld: false,
-  mouseClicked: false,
-  locked: false,
-  dragging: false,
-  onLockLost: null,
-  _canvas: null,
-  _wasLocked: false,
+  var CVH = window.CVH = window.CVH || {};
 
-  init: function (canvas) {
-    this._canvas = canvas;
-    const self = this;
+  var input = CVH.input = {
+    keys: {},
+    pressed: {},
+    mouseDown: false,
+    orbitDX: 0,        // accumulated orbit drag, consumed by the camera
+    orbitDY: 0,
+    locked: false,
+    onLockLost: null   // set by main.js — QA item 3 hook
+  };
 
-    window.addEventListener('keydown', function (e) {
-      if (!e.repeat) self.pressed[e.code] = true;
-      self.keys[e.code] = true;
-      if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'ArrowDown') e.preventDefault();
-    });
-    window.addEventListener('keyup', function (e) { self.keys[e.code] = false; });
-    window.addEventListener('blur', function () { self.keys = {}; self.mouseHeld = false; });
+  function code(e) { return e.code || e.key; }
 
+  window.addEventListener('keydown', function (e) {
+    var c = code(e);
+    if (!input.keys[c]) input.pressed[c] = true;
+    input.keys[c] = true;
+    if (c === 'Space' || c === 'ArrowUp' || c === 'ArrowDown' || c === 'Tab') e.preventDefault();
+  });
+  window.addEventListener('keyup', function (e) { input.keys[code(e)] = false; });
+  window.addEventListener('blur', function () { input.keys = {}; input.mouseDown = false; });
+
+  // Called by main at the end of each logic frame.
+  input.postFrame = function () {
+    input.pressed = {};
+    input.orbitDX = 0; input.orbitDY = 0;
+  };
+  input.down = function () {
+    for (var i = 0; i < arguments.length; i++) if (input.keys[arguments[i]]) return true;
+    return false;
+  };
+  input.hit = function () {
+    for (var i = 0; i < arguments.length; i++) if (input.pressed[arguments[i]]) return true;
+    return false;
+  };
+
+  // Mouse: holding the left button aims/fires (player.js reads
+  // mouseDown); movement while held — or any movement while pointer
+  // locked — orbits the camera.
+  var lastX = 0, lastY = 0, dragging = false;
+
+  input.attach = function (canvas) {
     canvas.addEventListener('mousedown', function (e) {
       if (e.button === 0) {
-        self.mouseHeld = true;
-        self.mouseClicked = true;
-        self.dragging = true;
+        input.mouseDown = true;
+        dragging = true;
+        lastX = e.clientX; lastY = e.clientY;
+        if (CVH.audio) CVH.audio.unlock();
       }
     });
     window.addEventListener('mouseup', function (e) {
-      if (e.button === 0) { self.mouseHeld = false; self.dragging = false; }
+      if (e.button === 0) { input.mouseDown = false; dragging = false; }
     });
     window.addEventListener('mousemove', function (e) {
-      if (self.locked || self.dragging) {
-        self.mouseDX += e.movementX || 0;
-        self.mouseDY += e.movementY || 0;
+      var dx = 0, dy = 0;
+      if (input.locked) {
+        dx = e.movementX || 0; dy = e.movementY || 0;
+      } else if (dragging) {
+        dx = e.clientX - lastX; dy = e.clientY - lastY;
+        lastX = e.clientX; lastY = e.clientY;
+      } else {
+        return;
+      }
+      input.orbitDX += dx; input.orbitDY += dy;
+    });
+    canvas.addEventListener('click', function () {
+      // Clicking the playfield asks for pointer lock on desktop Chrome;
+      // gameplay also works fully without it via drag-orbit.
+      if (CVH.state === 'playing' && !input.locked && canvas.requestPointerLock) {
+        try { canvas.requestPointerLock(); } catch (e) { /* not critical */ }
       }
     });
+  };
 
-    document.addEventListener('pointerlockchange', function () {
-      self.locked = (document.pointerLockElement === canvas);
-      if (!self.locked && self._wasLocked) {
-        // Pointer lock was released mid-play (Esc): no keydown ever arrives
-        // for that Esc, so main.js pauses the game from this hook instead.
-        if (typeof self.onLockLost === 'function') self.onLockLost();
-      }
-      self._wasLocked = self.locked;
-    });
-  },
-
-  requestLock: function () {
-    if (this._canvas && !this.locked) {
-      const p = this._canvas.requestPointerLock();
-      if (p && typeof p.catch === 'function') p.catch(function () { /* drag fallback still works */ });
-    }
-  },
-
-  releaseLock: function () {
-    if (this.locked) document.exitPointerLock();
-  },
-
-  down: function (code) { return !!this.keys[code]; },
-
-  // One-shot press: true once per physical press, consumed by the caller.
-  hit: function (code) {
-    if (this.pressed[code]) { this.pressed[code] = false; return true; }
-    return false;
-  },
-
-  clickHit: function () {
-    if (this.mouseClicked) { this.mouseClicked = false; return true; }
-    return false;
-  },
-
-  // Called by the main loop at the end of every frame.
-  endFrame: function () {
-    this.mouseDX = 0;
-    this.mouseDY = 0;
-    this.mouseClicked = false;
-    this.pressed = {};
-  }
-};
+  document.addEventListener('pointerlockchange', function () {
+    var was = input.locked;
+    input.locked = !!document.pointerLockElement;
+    // QA item 3: the browser exits pointer lock on Esc WITHOUT sending a
+    // keydown — main.js registers onLockLost to pause the game for us.
+    if (was && !input.locked && typeof input.onLockLost === 'function') input.onLockLost();
+  });
+  input.exitLock = function () {
+    if (document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
+  };
+})();

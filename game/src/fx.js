@@ -1,142 +1,118 @@
-'use strict';
-// Costa Verde Heat 3D — lightweight effects: one pooled point-particle system
-// (sparks, smoke, dust, muzzle sparks) and a small pool of tracer bolts.
-// Everything is pre-allocated; spawning never allocates mid-frame.
+// fx.js — lightweight pooled effects: impact sparks, tyre smoke, wreck
+// smoke, muzzle flashes and bullet tracers, plus a camera-shake value the
+// camera in main.js consumes. Everything is pooled; nothing allocates in
+// the hot loop. Owns CVH.fx.
+(function () {
+  'use strict';
 
-CVH.fx = {
-  MAX: 700,
-  _n: 0,
-  _pos: null,
-  _vel: null,
-  _life: null,
-  _maxLife: null,
-  _grav: null,
-  _points: null,
-  _geo: null,
-  _tracers: [],
-  _shake: 0,
+  var CVH = window.CVH = window.CVH || {};
+  var THREE = window.THREE;
 
-  init: function (scene) {
-    this._pos = new Float32Array(this.MAX * 3);
-    this._vel = new Float32Array(this.MAX * 3);
-    this._col = new Float32Array(this.MAX * 3);
-    this._life = new Float32Array(this.MAX);
-    this._maxLife = new Float32Array(this.MAX);
-    this._grav = new Float32Array(this.MAX);
-    this._geo = new THREE.BufferGeometry();
-    this._geo.setAttribute('position', new THREE.BufferAttribute(this._pos, 3));
-    this._geo.setAttribute('color', new THREE.BufferAttribute(this._col, 3));
-    const mat = new THREE.PointsMaterial({
-      size: 0.32, vertexColors: true, transparent: true, opacity: 0.95,
-      depthWrite: false, sizeAttenuation: true
-    });
-    this._points = new THREE.Points(this._geo, mat);
-    this._points.frustumCulled = false;
-    // Park every particle far below the city until spawned.
-    for (let i = 0; i < this.MAX; i++) this._pos[i * 3 + 1] = -100;
-    scene.add(this._points);
+  var POOL = 240;
+  var points = null, pGeo = null, pPos = null, pCol = null;
+  var parts = [];
+  var tracers = [];
+  var shake = 0;
 
-    const tGeo = new THREE.BoxGeometry(0.05, 0.05, 1);
-    const tMat = new THREE.MeshBasicMaterial({ color: 0xffe9a3, transparent: true, opacity: 0.95 });
-    for (let i = 0; i < 14; i++) {
-      const m = new THREE.Mesh(tGeo, tMat.clone());
-      m.visible = false;
-      scene.add(m);
-      this._tracers.push({ mesh: m, life: 0 });
+  var fx = CVH.fx = {};
+
+  fx.init = function (scene) {
+    pPos = new Float32Array(POOL * 3);
+    pCol = new Float32Array(POOL * 3);
+    for (var i = 0; i < POOL; i++) {
+      parts.push({ life: 0, max: 1, vx: 0, vy: 0, vz: 0, grav: 0, drag: 1, r: 1, g: 1, b: 1, size: 1 });
+      pPos[i * 3 + 1] = -100;
     }
-  },
+    pGeo = new THREE.BufferGeometry();
+    pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+    pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+    var mat = new THREE.PointsMaterial({ size: 0.55, vertexColors: true, transparent: true, opacity: 0.95, depthWrite: false, sizeAttenuation: true });
+    points = new THREE.Points(pGeo, mat);
+    points.frustumCulled = false;
+    points.renderOrder = 5;
+    scene.add(points);
+  };
 
-  _spawn: function (x, y, z, vx, vy, vz, r, g, b, life, grav) {
-    const i = this._n;
-    this._n = (this._n + 1) % this.MAX;
-    this._pos[i * 3] = x; this._pos[i * 3 + 1] = y; this._pos[i * 3 + 2] = z;
-    this._vel[i * 3] = vx; this._vel[i * 3 + 1] = vy; this._vel[i * 3 + 2] = vz;
-    this._col[i * 3] = r; this._col[i * 3 + 1] = g; this._col[i * 3 + 2] = b;
-    this._life[i] = life; this._maxLife[i] = life; this._grav[i] = grav;
-  },
-
-  sparks: function (p, n) {
-    for (let k = 0; k < (n || 10); k++) {
-      const a = Math.random() * CVH.TAU, s = 2 + Math.random() * 4;
-      this._spawn(p.x, p.y + 0.4, p.z,
-        Math.cos(a) * s, 1.5 + Math.random() * 3, Math.sin(a) * s,
-        1.0, 0.72 + Math.random() * 0.28, 0.25, 0.3 + Math.random() * 0.35, -9);
-    }
-  },
-
-  smoke: function (p) {
-    this._spawn(p.x + (Math.random() - 0.5) * 0.5, p.y + 1.1, p.z + (Math.random() - 0.5) * 0.5,
-      (Math.random() - 0.5) * 0.4, 1.1 + Math.random() * 0.7, (Math.random() - 0.5) * 0.4,
-      0.32, 0.32, 0.34, 1.1 + Math.random() * 0.7, 1.6);
-  },
-
-  dust: function (p, n) {
-    for (let k = 0; k < (n || 6); k++) {
-      const a = Math.random() * CVH.TAU, s = 0.6 + Math.random() * 1.4;
-      this._spawn(p.x, p.y + 0.25, p.z, Math.cos(a) * s, 0.5 + Math.random(), Math.sin(a) * s,
-        0.76, 0.7, 0.6, 0.5 + Math.random() * 0.4, -0.6);
-    }
-  },
-
-  muzzle: function (p, dir) {
-    for (let k = 0; k < 4; k++) {
-      this._spawn(p.x, p.y, p.z,
-        dir.x * 6 + (Math.random() - 0.5) * 2, dir.y * 6 + (Math.random() - 0.5) * 2, dir.z * 6 + (Math.random() - 0.5) * 2,
-        1.0, 0.8, 0.35, 0.07 + Math.random() * 0.05, 0);
-    }
-  },
-
-  bloodless_puff: function (p) { // soft grey-green puff when a punch lands
-    for (let k = 0; k < 5; k++) {
-      this._spawn(p.x, p.y + 1.1, p.z, (Math.random() - 0.5) * 1.6, 0.8, (Math.random() - 0.5) * 1.6,
-        0.6, 0.62, 0.55, 0.35, -1);
-    }
-  },
-
-  tracer: function (from, to) {
-    for (let i = 0; i < this._tracers.length; i++) {
-      const t = this._tracers[i];
-      if (t.life > 0) continue;
-      const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
-      const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (len < 0.5) return;
-      t.mesh.position.set((from.x + to.x) / 2, (from.y + to.y) / 2, (from.z + to.z) / 2);
-      t.mesh.scale.set(1, 1, len);
-      t.mesh.lookAt(to.x, to.y, to.z);
-      t.mesh.visible = true;
-      t.life = 0.055;
+  function spawn(x, y, z, vx, vy, vz, life, r, g, b, grav, drag) {
+    for (var i = 0; i < POOL; i++) {
+      var p = parts[i];
+      if (p.life > 0) continue;
+      p.life = life; p.max = life;
+      p.vx = vx; p.vy = vy; p.vz = vz;
+      p.r = r; p.g = g; p.b = b; p.grav = grav; p.drag = drag;
+      pPos[i * 3] = x; pPos[i * 3 + 1] = y; pPos[i * 3 + 2] = z;
       return;
     }
-  },
+  }
 
-  shake: function (amount) { this._shake = Math.min(0.55, this._shake + amount); },
-  shakeOffset: function () {
-    if (this._shake <= 0.001) return null;
-    return {
-      x: (Math.random() - 0.5) * this._shake,
-      y: (Math.random() - 0.5) * this._shake * 0.7
-    };
-  },
-
-  update: function (dt) {
-    for (let i = 0; i < this.MAX; i++) {
-      if (this._life[i] <= 0) continue;
-      this._life[i] -= dt;
-      if (this._life[i] <= 0) { this._pos[i * 3 + 1] = -100; continue; }
-      this._vel[i * 3 + 1] += this._grav[i] * dt;
-      this._pos[i * 3] += this._vel[i * 3] * dt;
-      this._pos[i * 3 + 1] += this._vel[i * 3 + 1] * dt;
-      this._pos[i * 3 + 2] += this._vel[i * 3 + 2] * dt;
+  fx.sparks = function (x, y, z, n) {
+    for (var i = 0; i < (n || 8); i++) {
+      spawn(x, y, z,
+        (Math.random() - 0.5) * 7, Math.random() * 4 + 1, (Math.random() - 0.5) * 7,
+        0.25 + Math.random() * 0.3, 1.0, 0.75, 0.25, -9, 0.98);
     }
-    this._geo.attributes.position.needsUpdate = true;
-    this._geo.attributes.color.needsUpdate = true;
-    for (let i = 0; i < this._tracers.length; i++) {
-      const t = this._tracers[i];
-      if (t.life > 0) {
-        t.life -= dt;
-        if (t.life <= 0) t.mesh.visible = false;
+  };
+  fx.smoke = function (x, y, z, dark, n) {
+    for (var i = 0; i < (n || 1); i++) {
+      var c = dark ? 0.16 : 0.75;
+      spawn(x + (Math.random() - 0.5) * 0.5, y, z + (Math.random() - 0.5) * 0.5,
+        (Math.random() - 0.5) * 0.7, 1.6 + Math.random() * 1.4, (Math.random() - 0.5) * 0.7,
+        0.9 + Math.random() * 0.8, c, c, c, 1.5, 0.985);
+    }
+  };
+  fx.dust = function (x, y, z) {
+    spawn(x, y, z, (Math.random() - 0.5) * 1.6, 0.8, (Math.random() - 0.5) * 1.6,
+      0.5, 0.85, 0.78, 0.62, 0.5, 0.97);
+  };
+  fx.muzzle = function (x, y, z) {
+    spawn(x, y, z, 0, 0.4, 0, 0.06, 1.0, 0.85, 0.4, 0, 1);
+    spawn(x, y, z, 0, 0.2, 0, 0.09, 1.0, 0.6, 0.2, 0, 1);
+  };
+
+  // A tracer is a short-lived additive line from muzzle to impact point.
+  fx.tracer = function (scene, ax, ay, az, bx, by, bz) {
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([ax, ay, az, bx, by, bz]), 3));
+    var m = new THREE.LineBasicMaterial({ color: 0xffd98a, transparent: true, opacity: 0.9 });
+    var line = new THREE.Line(g, m);
+    line.frustumCulled = false;
+    scene.add(line);
+    tracers.push({ line: line, life: 0.07 });
+  };
+
+  fx.addShake = function (v) { shake = Math.min(1.2, shake + v); };
+  fx.shakeValue = function () { return shake; };
+
+  fx.update = function (dt, scene) {
+    var i, p;
+    for (i = 0; i < POOL; i++) {
+      p = parts[i];
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { pPos[i * 3 + 1] = -100; pCol[i * 3] = pCol[i * 3 + 1] = pCol[i * 3 + 2] = 0; continue; }
+      p.vy += p.grav * dt;
+      var dr = Math.pow(p.drag, dt * 60);
+      p.vx *= dr; p.vy *= dr; p.vz *= dr;
+      pPos[i * 3] += p.vx * dt;
+      pPos[i * 3 + 1] += p.vy * dt;
+      pPos[i * 3 + 2] += p.vz * dt;
+      if (pPos[i * 3 + 1] < 0.05) { pPos[i * 3 + 1] = 0.05; p.vy = 0; }
+      var f = p.life / p.max;
+      pCol[i * 3] = p.r * f; pCol[i * 3 + 1] = p.g * f; pCol[i * 3 + 2] = p.b * f;
+    }
+    if (pGeo) {
+      pGeo.attributes.position.needsUpdate = true;
+      pGeo.attributes.color.needsUpdate = true;
+    }
+    for (i = tracers.length - 1; i >= 0; i--) {
+      tracers[i].life -= dt;
+      if (tracers[i].life <= 0) {
+        scene.remove(tracers[i].line);
+        tracers[i].line.geometry.dispose();
+        tracers[i].line.material.dispose();
+        tracers.splice(i, 1);
       }
     }
-    this._shake = Math.max(0, this._shake - dt * 1.4);
-  }
-};
+    shake = Math.max(0, shake - dt * 2.2);
+  };
+})();

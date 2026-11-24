@@ -1,82 +1,110 @@
-'use strict';
-// Costa Verde Heat 3D — shared helpers: seeded randomness, small math, and a
-// fail-safe localStorage wrapper. Every other module hangs off window.CVH.
+// util.js — shared helpers for Costa Verde Heat 3D.
+// One global namespace, CVH, is shared by every module (classic scripts,
+// no build step). This file owns: math helpers, the seeded RNG, angle
+// helpers, the safe-storage wrapper (QA item 1) and tiny DOM helpers.
+(function () {
+  'use strict';
 
-window.CVH = window.CVH || {};
+  var CVH = window.CVH = window.CVH || {};
 
-CVH.TAU = Math.PI * 2;
-CVH.UP = null; // set to a THREE.Vector3(0,1,0) by main.js once three.js is in
-
-CVH.clamp = function (v, a, b) { return v < a ? a : (v > b ? b : v); };
-CVH.lerp = function (a, b, t) { return a + (b - a) * t; };
-CVH.smooth = function (t) { t = CVH.clamp(t, 0, 1); return t * t * (3 - 2 * t); };
-
-// Deterministic PRNG (mulberry32) so a given seed always builds the same city.
-CVH.makeRng = function (seed) {
-  let s = (seed >>> 0) || 1;
-  return function () {
-    s = (s + 0x6D2B79F5) | 0;
-    let t = Math.imul(s ^ (s >>> 15), 1 | s);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  // ---------------------------------------------------------------- math
+  CVH.clamp = function (v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); };
+  CVH.lerp = function (a, b, t) { return a + (b - a) * t; };
+  CVH.dist2 = function (ax, az, bx, bz) {
+    var dx = ax - bx, dz = az - bz;
+    return dx * dx + dz * dz;
   };
-};
+  CVH.dist = function (ax, az, bx, bz) { return Math.sqrt(CVH.dist2(ax, az, bx, bz)); };
 
-// The live RNG; main.js reseeds it from the ?seed= parameter before world build.
-CVH.rng = CVH.makeRng(20261124);
-CVH.rand = function (a, b) { return a + CVH.rng() * (b - a); };
-CVH.randInt = function (a, b) { return Math.floor(CVH.rand(a, b + 1)); };
-CVH.pick = function (arr) { return arr[Math.floor(CVH.rng() * arr.length) % arr.length]; };
-CVH.chance = function (p) { return CVH.rng() < p; };
+  // Wrap an angle to [-PI, PI).
+  CVH.wrapAngle = function (a) {
+    while (a >= Math.PI) a -= Math.PI * 2;
+    while (a < -Math.PI) a += Math.PI * 2;
+    return a;
+  };
+  // Shortest signed turn from a to b.
+  CVH.angleDelta = function (a, b) { return CVH.wrapAngle(b - a); };
+  // Turn `a` toward `b` by at most `maxStep`.
+  CVH.turnToward = function (a, b, maxStep) {
+    var d = CVH.angleDelta(a, b);
+    if (d > maxStep) d = maxStep;
+    if (d < -maxStep) d = -maxStep;
+    return a + d;
+  };
 
-CVH.dist2d = function (ax, az, bx, bz) {
-  const dx = ax - bx, dz = az - bz;
-  return Math.sqrt(dx * dx + dz * dz);
-};
+  // Heading convention used by the whole game:
+  //   a heading angle h names the ground direction (sin h, cos h) in (x, z).
+  //   h = 0 faces +z ("south" on the minimap), h = PI faces -z ("north").
+  CVH.headingVec = function (h, out) {
+    out.x = Math.sin(h);
+    out.z = Math.cos(h);
+    return out;
+  };
+  CVH.vecHeading = function (x, z) { return Math.atan2(x, z); };
 
-// Wrap an angle to [-PI, PI).
-CVH.angleWrap = function (a) {
-  while (a >= Math.PI) a -= CVH.TAU;
-  while (a < -Math.PI) a += CVH.TAU;
-  return a;
-};
+  // ---------------------------------------------------------------- rng
+  // mulberry32 — small deterministic PRNG. The world is generated from a
+  // seed so screenshot scenes (?seed=1) are reproducible frame for frame.
+  CVH.makeRng = function (seed) {
+    var s = (seed >>> 0) || 1;
+    return function () {
+      s = (s + 0x6D2B79F5) >>> 0;
+      var t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  };
+  CVH.randRange = function (rng, lo, hi) { return lo + rng() * (hi - lo); };
+  CVH.randPick = function (rng, arr) { return arr[Math.floor(rng() * arr.length) % arr.length]; };
 
-// Turn `current` toward `target` by at most `maxStep` radians.
-CVH.angleTurn = function (current, target, maxStep) {
-  const d = CVH.angleWrap(target - current);
-  if (Math.abs(d) <= maxStep) return target;
-  return current + Math.sign(d) * maxStep;
-};
-
-// Safe storage: sandboxed iframes (no allow-same-origin) throw on ANY
-// localStorage access, so every read/write/delete in the game goes through
-// this wrapper and simply degrades to "no save" when storage is unavailable.
-CVH.store = {
-  get: function (key) {
-    try {
-      const raw = localStorage.getItem(key);
-      if (raw === null || raw === undefined) return null;
-      return JSON.parse(raw);
-    } catch (e) {
-      return null;
+  // ------------------------------------------------------- safe storage
+  // QA item 1: EVERY localStorage access in the game goes through this
+  // wrapper. In a sandboxed iframe (no allow-same-origin) even reading
+  // localStorage can throw; the wrapper swallows that and degrades to
+  // "no save" instead of breaking NEW GAME / save / load.
+  var memoryFallback = {};
+  CVH.store = {
+    get: function (key) {
+      try {
+        var v = window.localStorage.getItem(key);
+        return (v === null || v === undefined) ? (key in memoryFallback ? memoryFallback[key] : null) : v;
+      } catch (e) {
+        return key in memoryFallback ? memoryFallback[key] : null;
+      }
+    },
+    set: function (key, value) {
+      memoryFallback[key] = value;
+      try { window.localStorage.setItem(key, value); } catch (e) { /* iframe sandbox: keep the in-memory copy */ }
+    },
+    remove: function (key) {
+      delete memoryFallback[key];
+      try { window.localStorage.removeItem(key); } catch (e) { /* same as above */ }
     }
-  },
-  set: function (key, value) {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch (e) { /* storage unavailable: the run simply is not saved */ }
-  },
-  del: function (key) {
-    try {
-      localStorage.removeItem(key);
-    } catch (e) { /* nothing to delete when storage itself is unreachable */ }
-  }
-};
+  };
 
-// Format helpers for the HUD.
-CVH.fmtCash = function (n) { return '$' + Math.round(n).toLocaleString('en-US'); };
-CVH.fmtTime = function (sec) {
-  sec = Math.max(0, Math.ceil(sec));
-  const m = Math.floor(sec / 60), s = sec % 60;
-  return m + ':' + (s < 10 ? '0' : '') + s;
-};
+  // ---------------------------------------------------------------- dom
+  CVH.$ = function (id) { return document.getElementById(id); };
+  CVH.el = function (tag, cls, parent, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    if (parent) parent.appendChild(n);
+    return n;
+  };
+  CVH.fmtCash = function (n) {
+    var s = String(Math.max(0, Math.floor(n)));
+    var out = '';
+    while (s.length > 3) { out = ',' + s.slice(-3) + out; s = s.slice(0, -3); }
+    return '$' + s + out;
+  };
+  CVH.fmtTime = function (sec) {
+    sec = Math.max(0, Math.ceil(sec));
+    var m = Math.floor(sec / 60), s = sec % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  };
+
+  // Shared scratch vectors so hot paths do not allocate.
+  CVH._v1 = { x: 0, z: 0 };
+  CVH._v2 = { x: 0, z: 0 };
+})();
