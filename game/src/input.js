@@ -1,93 +1,82 @@
-// input.js — keyboard + mouse state, drag orbit and pointer lock.
-// Owns CVH.input: a `keys` set for held keys, edge-triggered `pressed`
-// flags consumed once per frame, mouse orbit deltas for the camera, and
-// the pointer-lock-loss callback used by QA item 3 (auto-pause).
+// input.js — keyboard + mouse state and pointer-lock bookkeeping.
+// Losing pointer lock while playing auto-pauses (wired in main.js via
+// input.onLockLost). The playtest drives input.keys directly.
 (function () {
   'use strict';
+  var CVH = window.CVH;
 
-  var CVH = window.CVH = window.CVH || {};
-
-  var input = CVH.input = {
-    keys: {},
-    pressed: {},
-    mouseDown: false,
-    orbitDX: 0,        // accumulated orbit drag, consumed by the camera
-    orbitDY: 0,
+  var input = {
+    keys: {},            // KeyboardEvent.code -> bool
     locked: false,
-    onLockLost: null   // set by main.js — QA item 3 hook
+    mouseDX: 0,
+    mouseDY: 0,
+    firing: false,       // left mouse held
+    onLockLost: null,    // set by main.js
+    onPauseKey: null,    // set by main.js (Esc / P)
+    onMuteKey: null,     // set by main.js (M)
+    onInteractKey: null, // set by main.js (E)
+    onEnterKey: null,
+
+    init: function (domElement) {
+      window.addEventListener('keydown', function (ev) {
+        if (ev.code === 'Space') ev.preventDefault();
+        if (!input.keys[ev.code]) {
+          if (ev.code === 'KeyM' && input.onMuteKey) input.onMuteKey();
+          if ((ev.code === 'Escape' || ev.code === 'KeyP') && input.onPauseKey) input.onPauseKey();
+          if (ev.code === 'KeyE' && input.onInteractKey) input.onInteractKey();
+          if (ev.code === 'KeyF' && input.onEnterKey) input.onEnterKey();
+        }
+        input.keys[ev.code] = true;
+      });
+      window.addEventListener('keyup', function (ev) {
+        input.keys[ev.code] = false;
+      });
+      window.addEventListener('blur', function () {
+        input.keys = {};
+        input.firing = false;
+      });
+
+      document.addEventListener('mousemove', function (ev) {
+        if (input.locked) {
+          input.mouseDX += ev.movementX || 0;
+          input.mouseDY += ev.movementY || 0;
+        }
+      });
+      document.addEventListener('mousedown', function (ev) {
+        if (ev.button === 0) input.firing = true;
+      });
+      document.addEventListener('mouseup', function (ev) {
+        if (ev.button === 0) input.firing = false;
+      });
+
+      document.addEventListener('pointerlockchange', function () {
+        var wasLocked = input.locked;
+        input.locked = document.pointerLockElement === domElement;
+        if (wasLocked && !input.locked && input.onLockLost) input.onLockLost();
+      });
+    },
+
+    requestLock: function (domElement) {
+      try {
+        var p = domElement.requestPointerLock && domElement.requestPointerLock();
+        if (p && p.catch) p.catch(function () { /* user gesture needed */ });
+      } catch (e) { /* ignored */ }
+    },
+
+    exitLock: function () {
+      try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) { /* ignored */ }
+    },
+
+    // Consume the accumulated mouse delta (called once per frame).
+    takeMouseDelta: function () {
+      var d = { x: input.mouseDX, y: input.mouseDY };
+      input.mouseDX = 0;
+      input.mouseDY = 0;
+      return d;
+    },
+
+    down: function (code) { return !!input.keys[code]; }
   };
 
-  function code(e) { return e.code || e.key; }
-
-  window.addEventListener('keydown', function (e) {
-    var c = code(e);
-    if (!input.keys[c]) input.pressed[c] = true;
-    input.keys[c] = true;
-    if (c === 'Space' || c === 'ArrowUp' || c === 'ArrowDown' || c === 'Tab') e.preventDefault();
-  });
-  window.addEventListener('keyup', function (e) { input.keys[code(e)] = false; });
-  window.addEventListener('blur', function () { input.keys = {}; input.mouseDown = false; });
-
-  // Called by main at the end of each logic frame.
-  input.postFrame = function () {
-    input.pressed = {};
-    input.orbitDX = 0; input.orbitDY = 0;
-  };
-  input.down = function () {
-    for (var i = 0; i < arguments.length; i++) if (input.keys[arguments[i]]) return true;
-    return false;
-  };
-  input.hit = function () {
-    for (var i = 0; i < arguments.length; i++) if (input.pressed[arguments[i]]) return true;
-    return false;
-  };
-
-  // Mouse: holding the left button aims/fires (player.js reads
-  // mouseDown); movement while held — or any movement while pointer
-  // locked — orbits the camera.
-  var lastX = 0, lastY = 0, dragging = false;
-
-  input.attach = function (canvas) {
-    canvas.addEventListener('mousedown', function (e) {
-      if (e.button === 0) {
-        input.mouseDown = true;
-        dragging = true;
-        lastX = e.clientX; lastY = e.clientY;
-        if (CVH.audio) CVH.audio.unlock();
-      }
-    });
-    window.addEventListener('mouseup', function (e) {
-      if (e.button === 0) { input.mouseDown = false; dragging = false; }
-    });
-    window.addEventListener('mousemove', function (e) {
-      var dx = 0, dy = 0;
-      if (input.locked) {
-        dx = e.movementX || 0; dy = e.movementY || 0;
-      } else if (dragging) {
-        dx = e.clientX - lastX; dy = e.clientY - lastY;
-        lastX = e.clientX; lastY = e.clientY;
-      } else {
-        return;
-      }
-      input.orbitDX += dx; input.orbitDY += dy;
-    });
-    canvas.addEventListener('click', function () {
-      // Clicking the playfield asks for pointer lock on desktop Chrome;
-      // gameplay also works fully without it via drag-orbit.
-      if (CVH.state === 'playing' && !input.locked && canvas.requestPointerLock) {
-        try { canvas.requestPointerLock(); } catch (e) { /* not critical */ }
-      }
-    });
-  };
-
-  document.addEventListener('pointerlockchange', function () {
-    var was = input.locked;
-    input.locked = !!document.pointerLockElement;
-    // QA item 3: the browser exits pointer lock on Esc WITHOUT sending a
-    // keydown — main.js registers onLockLost to pause the game for us.
-    if (was && !input.locked && typeof input.onLockLost === 'function') input.onLockLost();
-  });
-  input.exitLock = function () {
-    if (document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
-  };
+  CVH.input = input;
 })();

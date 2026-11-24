@@ -1,296 +1,167 @@
-// hud.js — all DOM presentation: the HUD (cash, health, wanted stars,
-// objective banner, speedometer, bust meter, prompts, toasts, mission
-// intros), the live 2D minimap, and the menu / pause / busted / wasted /
-// ending screens. Owns CVH.hud. Buttons report to CVH.hud.onAction,
-// which main.js assigns.
-//
-// OWNER FIX 1 — the minimap player arrow ROTATES with the player's
-// heading: every redraw it is drawn under a canvas rotation derived from
-// the live heading (character facing on foot, vehicle yaw while
-// driving), and the exact angle used is published on
-// CVH.debug.lastArrowAngle so the playtest can assert it numerically.
+// hud.js — DOM HUD (cash, stars, health, weapon, speedo, banner, toast)
+// and the 2D minimap. The minimap player marker is a TRIANGLE rotated
+// by the live heading — character facing on foot, vehicle yaw while
+// driving — recomputed on every draw, and the drawn angle is published
+// to CVH.debug.lastArrowAngle for the playtest.
 (function () {
   'use strict';
+  var CVH = window.CVH;
+  var U = CVH.util;
 
-  var CVH = window.CVH = window.CVH || {};
+  var el = {};
+  var toastTimer = null;
 
-  var hud = CVH.hud = { onAction: null };
-  var R = {};            // cached element refs
-  var mapCtx = null;
-  var toasts = [];       // {el, until}
-  var introUntil = 0;
-  var lastCash = null, lastWeapon = null, lastStars = -1, lastPrompt = undefined;
-  var lastBanner = '', lastHpW = -1;
+  var hud = {
+    el: el,
 
-  function action(name) {
-    return function () {
-      CVH.audio.unlock();
-      CVH.audio.ui();
-      if (typeof hud.onAction === 'function') hud.onAction(name);
-    };
-  }
+    init: function () {
+      ['cash', 'stars', 'healthFill', 'weapon', 'speedo', 'banner', 'bannerText', 'toast',
+       'minimap', 'soundState', 'bustFill', 'bustWrap', 'objective', 'jobTitle'].forEach(function (id) {
+        el[id] = document.getElementById(id);
+      });
+      hud.syncSoundLabel();
+    },
 
-  hud.init = function () {
-    var ids = ['hud', 'cash', 'hpfill', 'weapon', 'stars', 'banner', 'bannerLabel', 'bannerMeta',
-      'speedo', 'speedVal', 'carhp', 'minimap', 'bustwrap', 'bustfill', 'prompt', 'toasts',
-      'intro', 'introTitle', 'introText', 'menu', 'btnNew', 'btnContinue', 'pause', 'btnResume',
-      'btnSave', 'btnRestart', 'btnSound', 'soundState', 'over', 'overTitle', 'overText', 'btnOver',
-      'ending', 'endStats', 'btnRoam', 'btnEndNew', 'tickerTrack'];
-    for (var i = 0; i < ids.length; i++) R[ids[i]] = CVH.$(ids[i]);
-    mapCtx = R.minimap.getContext('2d');
+    // The one place the SOUND label is written; audio.toggleMute and
+    // audio.setMuted both call this, so every toggle path stays in sync.
+    syncSoundLabel: function () {
+      var s = document.getElementById('soundState');
+      if (s) s.textContent = CVH.audio && CVH.audio.muted ? 'OFF' : 'ON';
+      var b = document.getElementById('btnSound');
+      if (b) b.textContent = 'SOUND: ' + (CVH.audio && CVH.audio.muted ? 'OFF' : 'ON');
+    },
 
-    R.btnNew.addEventListener('click', action('new'));
-    R.btnContinue.addEventListener('click', action('continue'));
-    R.btnResume.addEventListener('click', action('resume'));
-    R.btnSave.addEventListener('click', action('save'));
-    R.btnRestart.addEventListener('click', action('restart'));
-    R.btnSound.addEventListener('click', action('sound'));
-    R.btnOver.addEventListener('click', action('over'));
-    R.btnRoam.addEventListener('click', action('roam'));
-    R.btnEndNew.addEventListener('click', action('endnew'));
-    hud.syncSoundLabel();
-  };
+    toast: function (msg, ms) {
+      if (!el.toast) return;
+      el.toast.textContent = msg;
+      el.toast.style.opacity = '1';
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(function () { el.toast.style.opacity = '0'; }, ms || 3400);
+    },
 
-  // QA item 6: one function owns the SOUND label, and it reads the true
-  // mute state from the audio module — menu button and M key alike.
-  hud.syncSoundLabel = function () {
-    if (R.soundState) R.soundState.textContent = CVH.audio.muted ? 'OFF' : 'ON';
-  };
-
-  // ------------------------------------------------------------- screens
-  function show(el, on) { if (el) el.style.display = on ? 'flex' : 'none'; }
-  hud.showMenu = function (hasSave) {
-    show(R.menu, true); show(R.pause, false); show(R.over, false); show(R.ending, false);
-    R.btnContinue.style.display = hasSave ? 'block' : 'none';
-    R.hud.style.display = 'none';
-  };
-  hud.showHud = function () {
-    show(R.menu, false); show(R.pause, false); show(R.over, false); show(R.ending, false);
-    R.hud.style.display = 'block';
-  };
-  hud.showPause = function (on) {
-    show(R.pause, on);
-    if (on) hud.syncSoundLabel();
-  };
-  hud.showOver = function (kind, text) {
-    R.overTitle.textContent = kind === 'busted' ? 'BUSTED' : 'WASTED';
-    R.overTitle.className = kind === 'busted' ? 'over-title busted' : 'over-title wasted';
-    R.overText.textContent = text;
-    show(R.over, true);
-  };
-  hud.hideOver = function () { show(R.over, false); };
-  hud.showEnding = function (stats) {
-    R.endStats.innerHTML =
-      '<div><span>Cash earned</span><b>' + CVH.fmtCash(stats.earned) + '</b></div>' +
-      '<div><span>Story jobs done</span><b>' + stats.jobs + ' / 6</b></div>' +
-      '<div><span>Cash packages</span><b>' + stats.packages + ' / 14</b></div>' +
-      '<div><span>Wallet now</span><b>' + CVH.fmtCash(CVH.player.cash) + '</b></div>';
-    show(R.ending, true);
-  };
-  hud.hideEnding = function () { show(R.ending, false); };
-
-  // -------------------------------------------------------------- toasts
-  hud.toast = function (text, secs) {
-    var el = CVH.el('div', 'toast', R.toasts, text);
-    toasts.push({ el: el, until: CVH.time + (secs || 2) });
-    while (toasts.length > 3) {
-      var old = toasts.shift();
-      if (old.el.parentNode) old.el.parentNode.removeChild(old.el);
-    }
-  };
-  hud.showIntro = function (title, text) {
-    R.introTitle.textContent = title;
-    R.introText.textContent = text;
-    R.intro.style.display = 'block';
-    introUntil = CVH.time + 6.5;
-  };
-  hud.setPrompt = function (text) {
-    if (text === lastPrompt) return;
-    lastPrompt = text;
-    if (text) {
-      R.prompt.textContent = text;
-      R.prompt.style.display = 'block';
-    } else {
-      R.prompt.style.display = 'none';
-    }
-  };
-
-  // -------------------------------------------------------------- update
-  hud.update = function () {
-    var player = CVH.player;
-    var police = CVH.police;
-
-    if (player.cash !== lastCash) {
-      lastCash = player.cash;
-      R.cash.textContent = CVH.fmtCash(player.cash);
-    }
-    var hpW = Math.round(CVH.clamp(player.hp / player.maxHp, 0, 1) * 100);
-    if (hpW !== lastHpW) {
-      lastHpW = hpW;
-      R.hpfill.style.width = hpW + '%';
-      R.hpfill.style.background = hpW > 45 ? '#53d769' : (hpW > 22 ? '#f2b134' : '#e03a2e');
-    }
-    var wname = player.weapon === 'fist' ? 'FISTS' : (player.weapon === 'pistol' ? 'PISTOL' : 'SMG');
-    if (wname !== lastWeapon) { lastWeapon = wname; R.weapon.textContent = wname; }
-
-    if (police.stars !== lastStars) {
-      lastStars = police.stars;
-      var s = '';
-      for (var i = 0; i < 5; i++) s += i < police.stars ? '★' : '☆';
-      R.stars.textContent = s;
-      R.stars.className = police.stars >= 4 ? 'stars hot' : 'stars';
-    }
-
-    // objective banner
-    var obj = CVH.missions ? CVH.missions.currentObjective() : null;
-    var bannerTxt = obj ? obj.label : '';
-    if (bannerTxt !== lastBanner) {
-      lastBanner = bannerTxt;
-      R.banner.style.display = obj ? 'block' : 'none';
-      if (obj) R.bannerLabel.textContent = obj.label;
-    }
-    if (obj) {
-      var meta = '';
-      if (obj.dist !== null && obj.dist !== undefined) meta = Math.round(obj.dist) + ' m';
-      if (obj.timeLeft !== null && obj.timeLeft !== undefined) {
-        meta += (meta ? ' · ' : '') + CVH.fmtTime(obj.timeLeft);
-        R.bannerMeta.className = obj.timeLeft < 15 ? 'banner-meta urgent' : 'banner-meta';
-      } else {
-        R.bannerMeta.className = 'banner-meta';
+    update: function () {
+      var player = CVH.player;
+      if (el.cash) el.cash.textContent = '$' + player.cash;
+      if (el.stars) {
+        var st = CVH.police.stars();
+        var s = '';
+        for (var i = 0; i < 5; i++) s += i < st ? '★' : '☆';
+        el.stars.textContent = s;
+        el.stars.style.color = st > 0 ? '#ffd34f' : '#8a93a3';
       }
-      R.bannerMeta.textContent = meta;
-    }
-
-    // speedometer while driving
-    if (player.car) {
-      R.speedo.style.display = 'block';
-      R.speedVal.textContent = Math.round(Math.abs(player.car.speed) * 3.6);
-      R.carhp.style.width = Math.round(player.car.hp) + '%';
-    } else {
-      R.speedo.style.display = 'none';
-    }
-
-    // bust meter
-    if (police.bust > 0.02) {
-      R.bustwrap.style.display = 'block';
-      R.bustfill.style.width = Math.round(police.bust * 100) + '%';
-    } else {
-      R.bustwrap.style.display = 'none';
-    }
-
-    // toasts & intro lifetimes
-    for (var j = toasts.length - 1; j >= 0; j--) {
-      if (CVH.time > toasts[j].until) {
-        if (toasts[j].el.parentNode) toasts[j].el.parentNode.removeChild(toasts[j].el);
-        toasts.splice(j, 1);
+      if (el.healthFill) el.healthFill.style.width = U.clamp(player.health, 0, 100) + '%';
+      if (el.weapon) {
+        var w = player.weapon;
+        el.weapon.textContent = w === 'fist' ? 'FISTS' :
+          w === 'pistol' ? 'PISTOL · ' + player.ammoPistol : 'SMG · ' + player.ammoSmg;
       }
-    }
-    if (introUntil && CVH.time > introUntil) {
-      R.intro.style.display = 'none';
-      introUntil = 0;
-    }
-
-    drawMinimap();
-  };
-
-  // ------------------------------------------------------------- minimap
-  // North is up: world -z is the top of the map, world +x is right.
-  var VIEW_R = 96; // metres visible from centre to edge
-  function drawMinimap() {
-    if (!mapCtx || R.hud.style.display === 'none') return;
-    var g = mapCtx;
-    var S = R.minimap.width;         // 176
-    var C = S / 2;
-    var scale = C / VIEW_R;
-    var player = CVH.player;
-    var px = player.x, pz = player.z;
-    function mx(x) { return C + (x - px) * scale; }
-    function mz(z) { return C + (z - pz) * scale; }
-
-    g.clearRect(0, 0, S, S);
-    g.fillStyle = '#20262e';
-    g.fillRect(0, 0, S, S);
-
-    // sea & sand to the east
-    var W = CVH.WORLD;
-    if (mx(W.WATER_X) < S) {
-      g.fillStyle = '#e6cf9f';
-      g.fillRect(mx(198), 0, Math.max(0, mx(W.WATER_X) - mx(198)), S);
-      g.fillStyle = '#2f7ea6';
-      g.fillRect(mx(W.WATER_X), 0, S - mx(W.WATER_X), S);
-    }
-
-    // roads
-    g.strokeStyle = '#454b54';
-    g.lineCap = 'butt';
-    var i;
-    for (i = 0; i < W.ROAD_XS.length; i++) {
-      var x = mx(W.ROAD_XS[i]);
-      if (x < -10 || x > S + 10) continue;
-      g.lineWidth = W.ROAD_W * scale;
-      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, S); g.stroke();
-    }
-    for (i = 0; i < W.ROAD_ZS.length; i++) {
-      var z = mz(W.ROAD_ZS[i]);
-      if (z < -10 || z > S + 10) continue;
-      g.lineWidth = W.ROAD_W * scale;
-      g.beginPath(); g.moveTo(0, z); g.lineTo(S, z); g.stroke();
-    }
-
-    // traffic (faint) and police (red blips)
-    for (i = 0; i < CVH.cars.length; i++) {
-      var c = CVH.cars[i];
-      var cx = mx(c.pos.x), cz = mz(c.pos.z);
-      if (cx < -4 || cx > S + 4 || cz < -4 || cz > S + 4) continue;
-      if (c.driver === 'police') {
-        g.fillStyle = (Math.sin(CVH.time * 10) > 0) ? '#ff3b30' : '#3b82ff';
-        g.beginPath(); g.arc(cx, cz, 3.4, 0, 6.29); g.fill();
-      } else if (c !== player.car) {
-        g.fillStyle = 'rgba(230,230,230,0.5)';
-        g.fillRect(cx - 1.6, cz - 1.6, 3.2, 3.2);
+      if (el.speedo) {
+        if (player.driving && player.car) {
+          el.speedo.style.display = 'block';
+          el.speedo.textContent = Math.round(Math.abs(player.car.speed) * 3.6) + ' km/h';
+        } else el.speedo.style.display = 'none';
       }
-    }
+      if (el.bustWrap) {
+        var bust = CVH.police.bust;
+        el.bustWrap.style.display = bust > 0.02 ? 'block' : 'none';
+        if (el.bustFill) el.bustFill.style.width = Math.round(bust * 100) + '%';
+      }
+      // objective banner
+      var t = CVH.missions.targetPoint();
+      if (el.banner && el.bannerText) {
+        if (t) {
+          el.banner.style.display = 'block';
+          var pos = player.pos();
+          var d = Math.round(U.dist(pos.x, pos.z, t.x, t.z));
+          var txt = t.label + '  ·  ' + d + ' m';
+          if (t.timer > 0) txt += '  ·  ' + Math.ceil(t.timer) + 's';
+          if (t.kind === 'job') {
+            var job = CVH.missions.JOBS[CVH.missions.active];
+            if (job) txt = job.title.replace(/^Job \d+ — /, '') + ': ' + txt;
+          }
+          el.bannerText.textContent = txt;
+        } else {
+          el.banner.style.display = 'none';
+        }
+      }
+      hud.drawMinimap();
+    },
 
-    // objective marker (clamped to the rim when far away)
-    var obj = CVH.missions ? CVH.missions.currentObjective() : null;
-    if (obj && obj.x !== null && obj.x !== undefined) {
-      var ox = mx(obj.x), oz = mz(obj.z);
-      var dx = ox - C, dz = oz - C;
-      var dl = Math.sqrt(dx * dx + dz * dz);
-      if (dl > C - 8) { ox = C + dx / dl * (C - 8); oz = C + dz / dl * (C - 8); }
-      g.fillStyle = '#ffc93c';
-      g.beginPath(); g.arc(ox, oz, 4.4, 0, 6.29); g.fill();
-      g.strokeStyle = '#7a5b00';
+    // ------------------------------------------------------------
+    // Minimap: north-up. World x -> canvas x, world z -> canvas y.
+    // The player arrow is a triangle whose tip is the facing vector
+    // rotated into canvas space: drawnAngle = atan2(f.x, -f.z).
+    // ------------------------------------------------------------
+    drawMinimap: function () {
+      var cv = el.minimap;
+      if (!cv) return;
+      var g = cv.getContext('2d');
+      var W = cv.width, H = cv.height;
+      var world = CVH.world;
+      var scale = W / 560;
+      function mx(x) { return (x + 260) * scale; }
+      function mz(z) { return (z + 260) * scale; }
+
+      g.fillStyle = '#3d5a34';
+      g.fillRect(0, 0, W, H);
+      // water + sand
+      g.fillStyle = '#2e6f9e';
+      g.fillRect(mx(world.waterX), 0, W - mx(world.waterX), H);
+      g.fillStyle = '#e3cf9e';
+      g.fillRect(mx(228), 0, mx(world.waterX) - mx(228), H);
+      // roads
+      g.fillStyle = '#3a3d44';
+      world.avenues.forEach(function (z) { g.fillRect(0, mz(z) - 7 * scale, W, 14 * scale); });
+      world.streets.forEach(function (x) { g.fillRect(mx(x) - 7 * scale, 0, 14 * scale, H); });
+      // pier
+      g.fillStyle = '#8a6f4d';
+      g.fillRect(mx(world.pier.minX), mz(world.pier.minZ), (world.pier.maxX - world.pier.minX) * scale, (world.pier.maxZ - world.pier.minZ) * scale);
+
+      var player = CVH.player;
+      var pos = player.pos();
+
+      function blip(x, z, color, r) {
+        g.fillStyle = color;
+        g.beginPath();
+        g.arc(mx(x), mz(z), r || 3, 0, Math.PI * 2);
+        g.fill();
+      }
+      // objective + services
+      var t = CVH.missions.targetPoint();
+      if (t) blip(t.x, t.z, t.kind === 'taxi' ? '#4fc3ff' : '#ffd34f', 4);
+      blip(world.porch.x, world.porch.z, '#ff9d5c', 3);
+      blip(world.payNSpray.x, world.payNSpray.z, '#3fd97e', 3);
+      // police
+      CVH.police.force.forEach(function (c) { if (!c.dead) blip(c.x, c.z, '#4f8dff', 3); });
+      // traffic
+      g.fillStyle = '#c8ccd4';
+      CVH.vehicles.traffic.forEach(function (c) {
+        g.fillRect(mx(c.x) - 1.5, mz(c.z) - 1.5, 3, 3);
+      });
+
+      // --- the rotating player arrow ---
+      var heading = player.driving && player.car ? player.car.yaw : player.heading;
+      var f = U.facing(heading);
+      var drawn = Math.atan2(f.x, -f.z);
+      CVH.debug.lastArrowAngle = drawn;
+      var cx = mx(pos.x), cy = mz(pos.z);
+      g.save();
+      g.translate(cx, cy);
+      g.rotate(drawn);
+      g.fillStyle = '#ffffff';
+      g.strokeStyle = '#14161f';
       g.lineWidth = 1.4;
-      g.beginPath(); g.arc(ox, oz, 4.4, 0, 6.29); g.stroke();
+      g.beginPath();
+      g.moveTo(0, -8);      // tip (facing)
+      g.lineTo(5.5, 6);
+      g.lineTo(0, 3.4);
+      g.lineTo(-5.5, 6);
+      g.closePath();
+      g.fill();
+      g.stroke();
+      g.restore();
     }
+  };
 
-    // ---- the player arrow (owner fix 1): rotated by the live heading
-    var heading = player.car ? player.car.yaw : player.heading;
-    var hx = Math.sin(heading), hz = Math.cos(heading);
-    var angle = Math.atan2(hx, -hz);
-    CVH.debug.lastArrowAngle = angle;
-    CVH.debug.arrowHeading = heading;
-    g.save();
-    g.translate(C, C);
-    g.rotate(angle);
-    g.beginPath();
-    g.moveTo(0, -9.5);
-    g.lineTo(6.4, 7.5);
-    g.lineTo(0, 3.6);
-    g.lineTo(-6.4, 7.5);
-    g.closePath();
-    g.fillStyle = '#ffffff';
-    g.fill();
-    g.strokeStyle = '#12303f';
-    g.lineWidth = 1.6;
-    g.stroke();
-    g.restore();
-
-    // north marker
-    g.fillStyle = 'rgba(255,255,255,0.85)';
-    g.font = 'bold 11px Arial';
-    g.textAlign = 'center';
-    g.fillText('N', C, 13);
-  }
+  CVH.hud = hud;
 })();
